@@ -1,5 +1,6 @@
 # libs/gcodelib.py
 import time
+import rhinoscriptsyntax as rs
 
 class GCodeLib:
     def __init__(self, filename, machine):
