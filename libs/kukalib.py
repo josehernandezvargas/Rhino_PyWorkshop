@@ -147,10 +147,10 @@ class KukaKRL:
             raise ValueError("Position must be a tuple with 6 values (X, Y, Z, A, B, C).")
         x, y, z, a, b, c = position
         self.code.append(
-            f"LIN {{X {x:.1f}, Y {y:.1f}, Z {z:.1f}, A {a:.2f}, B {b:.2f}, C {c:.2f}, E1 {e1}, E2 {e2}}} C_DIS"
+            f"LIN {{X {x:.1f}, Y {y:.1f}, Z {z:.1f}, A {a:.2f}, B {b:.2f}, C {c:.2f}, E1 {0}, E2 {0}}} C_DIS"
         )
 
-    def saveFile(self, filename):
+    def write_file(self, filename):
 
         if (self.TOOL_IS_DEFINED == False):
             Exception('You must define a tool')

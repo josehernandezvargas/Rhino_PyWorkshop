@@ -1,0 +1,11 @@
+{
+    "machine_name": "Ultimaker 2+",
+    "gcode_flavour": "UltiGCode",
+    "type": "cartesian",
+    "build_volume": {
+        "x": 223,
+        "y": 223,
+        "z": 205
+    },
+    "nozzle_diameter": 0.4
+}
