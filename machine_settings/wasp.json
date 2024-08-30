@@ -1,0 +1,10 @@
+{
+    "machine_name": "Wasp2040",
+    "gcode_flavour": "UltiGCode",
+    "type": "delta",
+    "build_volume": {
+        "r": 200,
+        "h": 400
+    },
+    "nozzle_diameter": 0.4
+}

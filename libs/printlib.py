@@ -1,5 +1,6 @@
 import rhinoscriptsyntax as rs
 from curvelib import centercrv
+import math
 
 
 def selfclosestpt2(pts, i, diam):
@@ -92,7 +93,7 @@ def leveltoplatform(input, height=0):
     return(output)
 
 
-def centerobject(input, buildplate=(223, 223)):
+def centerobject(input, buildplate=(223, 223), delta=False):
     """
     Centres the input geometry on the buildplate. Height is unchanged.
 
@@ -114,10 +115,14 @@ def centerobject(input, buildplate=(223, 223)):
     maxx = bbox[6][0]
     maxy = bbox[6][1]
     maxz = bbox[6][2]
-    centrex = (minx + maxx) / 2
-    dispx = buildplate[0]/2 - centrex
+    centrex = (minx + maxx) / 2 # part midpoint in x and y
     centrey = (miny + maxy) / 2
-    dispy = buildplate[1]/2 - centrey
+    if delta:
+        dispx = -centrex
+        dispy = -centrey
+    else:
+        dispx = buildplate[0]/2 - centrex
+        dispy = buildplate[1]/2 - centrey
     dispvector = rs.CreateVector(dispx, dispy, 0)
     if type(input) is list:
         output = []
@@ -129,7 +134,7 @@ def centerobject(input, buildplate=(223, 223)):
 
 def gcodeline(g, pt=None, x=None, y=None, z=None, f=None, e=None, v=None):
     """
-    Creates a line of gcode from a variable set of kw arguments
+    Creates a line of gcode from a variable set of keyword arguments
     pt: it can be used to define the x,y,z coordinates by a tuple
     x,y,z values will override the values on pt if present
     """
@@ -146,6 +151,12 @@ def gcodeline(g, pt=None, x=None, y=None, z=None, f=None, e=None, v=None):
     v = " V{:.1f}".format(float(v)) if v else ""
     gline =  g + x + y + z + v + e + f 
     return(gline)
+
+def caluclate_flow(nozzle, layerheight, filament):
+    narea = (((nozzle / 2) ** 2) * math.pi) # nozzle area
+    filarea = (((filament / 2) ** 2) * math.pi) # filament area
+    flow = (nozzle * layerheight) / filarea * 10
+    return(flow)
 
 def materialestimation(length, nozzle, unit=0):
     """

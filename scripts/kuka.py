@@ -43,8 +43,11 @@ firstpt = (startpt[0] , startpt[1], 50.0) #HACK: hardcoded 50 mm height for firs
 #secondpt = (100.0 ,1450.0, 10.0)
 
 
-# Main loop
+# Check if both lists have the same length
+if len(PTS) != len(VEL):
+    print("The lists have different lengths")
 
+# Main loop
 for i, pt in enumerate(PTS):
     vel = round(VEL[i]/1000, 3) # velocity in m/s
     pt = rs.coerce3dpoint(pt)
@@ -54,32 +57,31 @@ for i, pt in enumerate(PTS):
         krl.code.append("$ADVANCE=3")
         krl.code.append(";ENDFOLD")
         krl.code.append("$OUT[3]=FALSE")
-        krl.lin(firstpt[0],firstpt[1],firstpt[2], 0.0, 0.0, 0.0, 0, 0)
+        plane = (firstpt[0],firstpt[1],firstpt[2], 0, 0, 0 )
+        krl.lin(plane)
 #        krl.LIN(secondpt[0],secondpt[1],secondpt[2], 0, 0, 0, 0, 0)
         previewpts.append(firstpt)
 #        previewpts.append(secondpt)
         lastvel = vel
     if vel != lastvel:
-        krl.setVelocity(vel)
+        krl.set_velocity(vel)
 #    print vel
-    krl.lin(pt.X, pt.Y, pt.Z, 0.0, 0.0, 0.0, 0, 0)
+    krl.lin([pt.X, pt.Y, pt.Z, 0, 0, 0])
     previewpts.append(pt)
     lastvel = vel
     lastpt = pt
 krl.code.append("$OUT[3]=TRUE")
 
 # Rise the nozzle quickly after the last point
-krl.setVelocity(0.25)
-krl.lin(firstpt[0], firstpt[1], lastpt[2]+50, 0.0, 0.0, 0.0, 0, 0)
+krl.set_velocity(0.25)
+krl.lin([firstpt[0], firstpt[1], lastpt[2]+50, 0, 0, 0])
 previewpts.append(rs.AddPoint(firstpt[0], firstpt[1], lastpt[2]+50))
 # Add a last exit point after the print
-krl.lin(firstpt[0], firstpt[1], lastpt[2], 0.0, 0.0, 0.0, 0, 0)
+krl.lin([firstpt[0], firstpt[1], lastpt[2], 0, 0, 0])
 previewpts.append(rs.AddPoint(firstpt[0], firstpt[1], lastpt[2]))
 krl.code.append("$OUT[3]=FALSE")
 
-krl.code.append("END")
 
-a = krl.code
 
 file = os.path.dirname(os.path.realpath(ghdoc.Path))
 extension = ".src"
@@ -89,9 +91,7 @@ previewpath = rs.AddPolyline(previewpts)
 
 
 if save:
-    with open(file, "w") as filePath:  # Open the file
-        for line in krl.code:  # Iterate through lines
-            filePath.write(line + "\n")  # Write separate lines
+    krl.write_file(file)
 
     # print the filepath and a timestamp with the hour
     print('File Saved  ' + file + hourstamp)
@@ -99,3 +99,5 @@ else:
     msg = "Set 'write' to True."
     ghenv.Component.AddRuntimeMessage(
         gh.Kernel.GH_RuntimeMessageLevel.Warning, msg)
+
+a = krl.code

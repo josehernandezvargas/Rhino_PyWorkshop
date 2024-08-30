@@ -22,6 +22,14 @@ def remap(imin, imax, omin, omax, v):
     t = invlerp(imin, imax, v)
     return(lerp(omin, omax, t))
 
+def lerppts( a , b , t):
+    """"
+    Creates a linear interpolation between two points
+    Returns the value for a parameter t in the range a - b"""
+    x = (( 1 - t ) * a[0] + b[0] * t )
+    y = (( 1 - t ) * a.Y + b.Y * t )
+    z = (( 1 - t ) * a.Z + b.Z * t )
+    return (rs.AddPoint(x,y,z))
 
 def minmaxcaplist(lo, hi, t):
     """Clamps a value between two limits"""

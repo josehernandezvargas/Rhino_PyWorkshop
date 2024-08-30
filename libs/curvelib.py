@@ -178,8 +178,8 @@ def sort_curves_z(crvs):
     return sorted(crvs, key=lambda curve: rs.CurvePlane(curve)[0][2])
 
 def spiralise(points , height):
-    """transforms a list of points to a continously rising spiral
-    it works best with even-spaced points
+    """transforms a list of points to a continously rising spiral with vertical (+z) displacement
+    it requires even-spaced points
     """
     newpts = []
     for i, pt in enumerate(points):
@@ -187,3 +187,11 @@ def spiralise(points , height):
         point = rs.PointCoordinates(rs.CopyObject(pt , disp))
         newpts.append(point)
     return newpts
+
+def divide_crv_equal(crv, target_distance, create_points=False, return_points=True):
+    """
+    divides a curve into equal segments by dividing 
+    """
+    length_div = rs.DivideCurveLength(crv, target_distance, False, False)
+    divs = len(length_div)
+    return rs.DivideCurve(crv, divs, create_points, return_points)

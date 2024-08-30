@@ -5,6 +5,7 @@ Exports gcode for Ultimaker taking a list of points and a list of velocities as 
 
 TODO: 
 -find a better name
+-implement gcode Class
 -integrate with main script
 """
 
@@ -63,34 +64,7 @@ maxz = bbox[6][2]
 #    warning = "Flying model! (not attached to the buildplate)"
 #    ghenv.Component.AddRuntimeMessage(gh.Kernel.GH_RuntimeMessageLevel.Warning, warning)
 
-# G code utilities
 
-
-def gcline(g, f, pt, *e):
-    """ Generates a line of gcode from points
-    Inputs:
-        g : G0 or G1
-        f : feedrate
-        pt: point to extract x y z coordinates
-        e : extruder movement (optional)
-    """
-    f = str(f)
-    ptx = "{:.3f}".format(pt[0])
-    pty = "{:.3f}".format(pt[1])
-    ptz = "{:.3f}".format(pt[2] + zero)
-    if e:
-        ext = "{:.3f}".format(float(e[0]))
-        # line = "G" + str(g) + " F" + f + " X" + ptx + \
-        #     " Y" + pty + " Z" + ptz + " E" + ext
-        line = "G{} F{} X{} Y{} Z{} E{}".format(
-            g, f, ptx, pty, ptz, ext)
-    else:
-        # line = "G" + str(g) + " F" + f + " X" + ptx + " Y" + pty + " Z" + ptz
-        line = "G{} F{} X{} Y{} Z{}".format(
-            g, f, ptx, pty, ptz)
-    return(line)
-
-# ###
 
 
 # if printer == "2+" or "3+":
