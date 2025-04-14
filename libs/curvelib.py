@@ -195,3 +195,23 @@ def divide_crv_equal(crv, target_distance, create_points=False, return_points=Tr
     length_div = rs.DivideCurveLength(crv, target_distance, False, False)
     divs = len(length_div)
     return rs.DivideCurve(crv, divs, create_points, return_points)
+
+def orient_cross_sections(frames, cross_section):
+    """
+    Orient curves into the plane frames.
+    
+    Parameters:
+    frames (list): A list of planes to orient the cross sections to.
+    cross_section (GUID): The identifier of the cross section curve to be oriented.
+    
+    Returns:
+    list: A list of oriented cross section curves.
+    """
+    oriented_sections = []
+    for frame in frames:
+        # Orient the cross section to the frame
+        oriented_section = rs.CopyObject(cross_section)
+        rs.OrientObject(oriented_section, rs.WorldXYPlane(), frame)
+        oriented_sections.append(oriented_section)
+    
+    return oriented_sections

@@ -1,8 +1,5 @@
 #! python
 
-"""Grasshopper Script
-"""
-
 __author__ = "jose hernandez vargas"
 __version__ = "2024-06-26"
 
@@ -54,75 +51,75 @@ class KukaKRL:
             raise Exception(
                 'You need to define a tool and a base first.')
 
-            if len(startposition) == 6 and all(isinstance(i, (int, float)) for i in startposition):
-                A1, A2, A3, A4, A5, A6 = startposition
-            else:
-                raise Exception(
-                    "Start position should be a tuple with angles for each robot axis")
-            # An Array that will contain all of the commands
-            self.code = []
-            base = self.base
-            tool = self.tool
 
-            # header from template
-            self.code.append("&ACCESS RVP")
-            self.code.append("&REL 1")
-            self.code.append("&PARAM TEMPLATE = C:\KRC\Roboter\Template\\vorgabe")
-            self.code.append("&PARAM EDITMASK = *")
+        if len(startposition) == 6 and all(isinstance(i, (int, float)) for i in startposition):
+            A1, A2, A3, A4, A5, A6 = startposition
+        else:
+            raise Exception(
+                "Start position should be a tuple with angles for each robot axis")
+        # An Array that will contain all of the commands
+        base = self.base
+        tool = self.tool
 
-            # add some initial setup stuff
-            self.code.append("DEF "+str(self.name)+" ( )")
-            self.code.append(";FOLD INI")
-            self.code.append(";FOLD BASISTECH INI")
-            self.code.append(
-                "GLOBAL INTERRUPT DECL 3 WHEN $STOPMESS==TRUE DO IR_STOPM ( )")
+        # header from template
+        self.code.append("&ACCESS RVP")
+        self.code.append("&REL 1")
+        self.code.append("&PARAM TEMPLATE = C:\KRC\Roboter\Template\\vorgabe")
+        self.code.append("&PARAM EDITMASK = *")
 
-            """
-                INTERRUPT
+        # add some initial setup stuff
+        self.code.append("DEF "+str(self.name)+" ( )")
+        self.code.append(";FOLD INI")
+        self.code.append(";FOLD BASISTECH INI")
+        self.code.append(
+            "GLOBAL INTERRUPT DECL 3 WHEN $STOPMESS==TRUE DO IR_STOPM ( )")
 
-                Description Executes one of the following actions:
-                    - Activates an interrupt.
-                    - Deactivates an interrupt.
-                    - Disables an interrupt.
-                    - Enables an interrupt.
-                Up to 16 interrupts may be active at any one time
-                
-            """
-            self.code.append("INTERRUPT ON 3")
-            self.code.append("BAS (#INITMOV,0 )")
-            self.code.append(";ENDFOLD (BASISTECH INI)")
-            self.code.append(";ENDFOLD (INI)")
+        """
+            INTERRUPT
 
-            self.code.append(";FOLD STARTPOSITION - BASE IS {}, TOOL IS {}, SPEED IS 100%, POSITION IS A1 {},A2 {},A3 {},A4 {},A5 {},A6 {},E1 0,E2 0,E3 0,E4 0".format(
-                base, tool, A1, A2, A3, A4, A5, A6))
-            self.code.append("$BWDSTART = FALSE")
-            self.code.append("PDAT_ACT = {VEL 100,ACC 20,APO_DIST 50}")
-            self.code.append(
-                "FDAT_ACT = {{TOOL_NO {},BASE_NO {},IPO_FRAME #BASE}}".format(tool, base))
-            self.code.append("BAS (#PTP_PARAMS,100)")
-            self.code.append("PTP  {{A1 {},A2 {},A3 {},A4 {},A5 {},A6 {},E1 0,E2 0,E3 0,E4 0}}".format(
-                A1, A2, A3, A4, A5, A6))
-            self.code.append(";ENDFOLD")
+            Description Executes one of the following actions:
+                - Activates an interrupt.
+                - Deactivates an interrupt.
+                - Disables an interrupt.
+                - Enables an interrupt.
+            Up to 16 interrupts may be active at any one time
+            
+        """
+        self.code.append("INTERRUPT ON 3")
+        self.code.append("BAS (#INITMOV,0 )")
+        self.code.append(";ENDFOLD (BASISTECH INI)")
+        self.code.append(";ENDFOLD (INI)")
 
-            # self.code.append("$APO.CDIS = 0.5000")
-            # self.code.append("BAS (#INITMOV,0)")
-            # self.code.append("BAS (#VEL_PTP,20)")
-            # self.code.append("BAS (#ACC_PTP,20)")
-            # self.code.append("")
+        self.code.append(";FOLD STARTPOSITION - BASE IS {}, TOOL IS {}, SPEED IS 100%, POSITION IS A1 {},A2 {},A3 {},A4 {},A5 {},A6 {},E1 0,E2 0,E3 0,E4 0".format(
+            base, tool, A1, A2, A3, A4, A5, A6))
+        self.code.append("$BWDSTART = FALSE")
+        self.code.append("PDAT_ACT = {VEL 100,ACC 20,APO_DIST 50}")
+        self.code.append(
+            "FDAT_ACT = {{TOOL_NO {},BASE_NO {},IPO_FRAME #BASE}}".format(tool, base))
+        self.code.append("BAS (#PTP_PARAMS,100)")
+        self.code.append("PTP  {{A1 {},A2 {},A3 {},A4 {},A5 {},A6 {},E1 0,E2 0,E3 0,E4 0}}".format(
+            A1, A2, A3, A4, A5, A6))
+        self.code.append(";ENDFOLD")
 
-            """
-                Advance run
-                The advance run is the maximum number of motion blocks that the robot controller calculates and plans in advance during program execution. The actual
-                number is dependent on the capacity of the computer.
-                The advance run refers to the current position of the block pointer. It is set via
-                the system variable $ADVANCE:
-                    - Default value: 3
-                    - Maximum value: 5
-                The advance run is required, for example, in order to be able to calculate approximate positioning motions. If $ADVANCE = 0 is set, approximate positioning is not possible.
-                Certain statements trigger an advance run stop. These include statements
-                that influence the periphery, e.g. OUT statements
-            """
-            self.code.append("$ADVANCE=3")
+        # self.code.append("$APO.CDIS = 0.5000")
+        # self.code.append("BAS (#INITMOV,0)")
+        # self.code.append("BAS (#VEL_PTP,20)")
+        # self.code.append("BAS (#ACC_PTP,20)")
+        # self.code.append("")
+
+        """
+            Advance run
+            The advance run is the maximum number of motion blocks that the robot controller calculates and plans in advance during program execution. The actual
+            number is dependent on the capacity of the computer.
+            The advance run refers to the current position of the block pointer. It is set via
+            the system variable $ADVANCE:
+                - Default value: 3
+                - Maximum value: 5
+            The advance run is required, for example, in order to be able to calculate approximate positioning motions. If $ADVANCE = 0 is set, approximate positioning is not possible.
+            Certain statements trigger an advance run stop. These include statements
+            that influence the periphery, e.g. OUT statements
+        """
+        self.code.append("$ADVANCE=3")
 
     def set_output(self, output_number: int, state: bool):
         """Set the state of a specified output."""
@@ -151,13 +148,6 @@ class KukaKRL:
         )
 
     def write_file(self, filename):
-
-        if (self.TOOL_IS_DEFINED == False):
-            Exception('You must define a tool')
-            return
-        if (self.BASE_IS_DEFINED == False):
-            Exception('You must define a base')
-            return
 
         # Since we are done adding lines to the program, we will END it
         self.code.append("END")
