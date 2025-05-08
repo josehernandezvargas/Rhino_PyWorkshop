@@ -24,7 +24,7 @@ def selfclosestpt2(pts, i, diam):
     pt = pts[i]
     closestpt = newlist[rs.PointArrayClosestPoint(newlist, pt)]
     # returns a single distance
-    return(rs.Distance(pts[i], closestpt))
+    return (rs.Distance(pts[i], closestpt))
 
 
 def testline(object, length, distance):
@@ -34,7 +34,7 @@ def testline(object, length, distance):
     offvect = (0, -distance, 0)
     line = centercrv(end, start, length)
     line = rs.MoveObject(line, offvect)
-    return(line)
+    return (line)
 
 
 def curveselfintersection(crv, *params):
@@ -55,9 +55,9 @@ def curveselfintersection(crv, *params):
                 else:
                     print("curve overlap")
         if params:
-            return(intparams)
+            return (intparams)
         else:
-            return(intpoints)
+            return (intpoints)
 
 
 def leveltoplatform(input, height=0):
@@ -90,7 +90,7 @@ def leveltoplatform(input, height=0):
             output.append(rs.MoveObject(crv, vector))
     else:
         output = rs.MoveObject(input, vector)
-    return(output)
+    return (output)
 
 
 def centerobject(input, buildplate=(223, 223), delta=False):
@@ -115,7 +115,7 @@ def centerobject(input, buildplate=(223, 223), delta=False):
     maxx = bbox[6][0]
     maxy = bbox[6][1]
     maxz = bbox[6][2]
-    centrex = (minx + maxx) / 2 # part midpoint in x and y
+    centrex = (minx + maxx) / 2  # part midpoint in x and y
     centrey = (miny + maxy) / 2
     if delta:
         dispx = -centrex
@@ -132,13 +132,14 @@ def centerobject(input, buildplate=(223, 223), delta=False):
         output = rs.CopyObject(input, dispvector)
     return output
 
+
 def gcodeline(g, pt=None, x=None, y=None, z=None, f=None, e=None, v=None):
     """
     Creates a line of gcode from a variable set of keyword arguments
     pt: it can be used to define the x,y,z coordinates by a tuple
     x,y,z values will override the values on pt if present
     """
-    if pt and len(pt)==3:
+    if pt and len(pt) == 3:
         x = pt[0]
         y = pt[1]
         z = pt[2]
@@ -149,14 +150,16 @@ def gcodeline(g, pt=None, x=None, y=None, z=None, f=None, e=None, v=None):
     e = " E{:.1f}".format(float(e)) if e is not None else ""
     f = " F{}".format(int(f)) if f else ""
     v = " V{:.1f}".format(float(v)) if v else ""
-    gline =  g + x + y + z + v + e + f 
-    return(gline)
+    gline = g + x + y + z + v + e + f
+    return (gline)
+
 
 def caluclate_flow(nozzle, layerheight, filament):
-    narea = (((nozzle / 2) ** 2) * math.pi) # nozzle area
-    filarea = (((filament / 2) ** 2) * math.pi) # filament area
+    narea = (((nozzle / 2) ** 2) * math.pi)  # nozzle area
+    filarea = (((filament / 2) ** 2) * math.pi)  # filament area
     flow = (nozzle * layerheight) / filarea * 10
-    return(flow)
+    return (flow)
+
 
 def materialestimation(length, nozzle, unit=0):
     """
@@ -172,8 +175,47 @@ def materialestimation(length, nozzle, unit=0):
     """
     from math import pi
     r = nozzle/2
-    area = pi * r**2 # in mm2
-    vol  = area * length # in mm3
-    l = vol/1000000 # vol in litres
-    m = length/1000 # length in metres
+    area = pi * r**2  # in mm2
+    vol = area * length  # in mm3
+    l = vol/1000000  # vol in litres
+    m = length/1000  # length in metres
     return l
+
+
+def slice_brep_uniform(brep, layer_height, max_deviation=0.1):
+    """
+    Uniformly slice a Brep with horizontal planes, returning polylines approximating the intersection curves.
+
+    Parameters:
+        brep (GUID): Rhino Brep object to slice.
+        layer_height (float): Distance between slicing planes.
+        max_deviation (float): Maximum deviation when converting curves to polylines.
+
+    Returns:
+        list of PolylineCurve: Each element is a Rhino polyline curve.
+    """
+    if not rs.IsBrep(brep):
+        raise ValueError("Input is not a valid Brep")
+
+    bbox = rs.BoundingBox(brep)
+    if not bbox:
+        raise ValueError("Failed to compute bounding box")
+
+    z_min = bbox[0].Z
+    z_max = bbox[4].Z
+    start_pt = [0, 0, z_min]
+    end_pt = [0, 0, z_max]
+
+    contours = rs.AddSrfContourCrvs(brep, start_pt, end_pt, layer_height)
+    if not contours:
+        return []
+
+    slices = []
+    for crv in contours:
+        poly = rs.ConvertCurveToPolyline(
+            crv, angle_tolerance=1.0, tolerance=max_deviation)
+        if poly:
+            slices.append(poly)
+        rs.DeleteObject(crv)
+
+    return slices

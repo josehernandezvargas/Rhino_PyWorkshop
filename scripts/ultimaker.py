@@ -137,7 +137,11 @@ materialflow = caluclateflow(nozzle, layerheight, filament)
 # Feedrates
 
 F0 = 3600
-F1 = 600
+# Use default feedrate if F is not set
+try:
+    F1 = float(F)
+except:
+    F1 = 600
 
 ext = 0.0
 tool = 0
