@@ -1,5 +1,8 @@
 import rhinoscriptsyntax as rs
+from geometrylib import lerp, invlerp, remap, normalize_pattern
+from srflib import get_division_parameters, sample_surface_color
 from curvelib import centercrv
+from itertools import cycle
 import math
 
 
@@ -219,3 +222,4 @@ def slice_brep_uniform(brep, layer_height, max_deviation=0.1):
         rs.DeleteObject(crv)
 
     return slices
+
