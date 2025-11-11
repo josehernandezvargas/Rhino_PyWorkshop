@@ -135,7 +135,7 @@ def generate_pattern_stack(crvs, srf, img, pattern, dist_range, amp_range, shift
             crv, srf, img, dist_range, amp_range, shift_range)
         poly1, poly2 = build_alternating_polylines(crv, div_data)
         tag = next(pattern_gen)
-        polyline = rs.AddPolyline(poly1 if tag == 'A' else poly2)
+        polyline = rs.AddPolyline(poly1 if tag else poly2)
         if polyline:
             stacked.append(polyline)
 

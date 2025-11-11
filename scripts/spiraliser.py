@@ -6,6 +6,7 @@ Converts a list of planar curves into a continuous spiral
     Inputs:
         crvs: list of crvs
         delta: distance for curve division
+        div_length: length of divisions along the curve
     Output:
         a: The a output variable
 """

@@ -1,8 +1,5 @@
 import rhinoscriptsyntax as rs
-from geometrylib import lerp, invlerp, remap, normalize_pattern
-from srflib import get_division_parameters, sample_surface_color
 from curvelib import centercrv
-from itertools import cycle
 import math
 
 
@@ -185,7 +182,7 @@ def materialestimation(length, nozzle, unit=0):
     return l
 
 
-def slice_brep_uniform(brep, layer_height, max_deviation=0.1):
+def slice_brep_uniform(brep, layer_height, max_deviation=0.1, max_slices=1000):
     """
     Uniformly slice a Brep with horizontal planes, returning polylines approximating the intersection curves.
 
@@ -193,6 +190,7 @@ def slice_brep_uniform(brep, layer_height, max_deviation=0.1):
         brep (GUID): Rhino Brep object to slice.
         layer_height (float): Distance between slicing planes.
         max_deviation (float): Maximum deviation when converting curves to polylines.
+        max_slices (int): Maximum number of allowable slices to prevent overload.
 
     Returns:
         list of PolylineCurve: Each element is a Rhino polyline curve.
@@ -200,26 +198,73 @@ def slice_brep_uniform(brep, layer_height, max_deviation=0.1):
     if not rs.IsBrep(brep):
         raise ValueError("Input is not a valid Brep")
 
+    if layer_height <= 0:
+        raise ValueError("Layer height must be greater than zero")
+
     bbox = rs.BoundingBox(brep)
     if not bbox:
         raise ValueError("Failed to compute bounding box")
 
     z_min = bbox[0].Z
     z_max = bbox[4].Z
+    height = z_max - z_min
+    num_slices = int(height / layer_height)
+
+    if num_slices > max_slices:
+        raise ValueError(f"Too many slices ({num_slices}). Reduce the number by increasing the layer height.")
+
     start_pt = [0, 0, z_min]
     end_pt = [0, 0, z_max]
 
-    contours = rs.AddSrfContourCrvs(brep, start_pt, end_pt, layer_height)
+    contours = rs.AddSrfContourCrvs(brep, [start_pt, end_pt], layer_height)
     if not contours:
         return []
 
     slices = []
     for crv in contours:
-        poly = rs.ConvertCurveToPolyline(
-            crv, angle_tolerance=1.0, tolerance=max_deviation)
+        poly = rs.ConvertCurveToPolyline(crv, angle_tolerance=1.0, tolerance=max_deviation)
         if poly:
             slices.append(poly)
         rs.DeleteObject(crv)
 
     return slices
 
+
+def stack_curves_by_pattern(crvA, crvB, pattern="AB", layer_height=1.0, total_height=10.0):
+    """
+    Creates a vertical stack of curve copies based on a repeating pattern until a given height is reached.
+
+    Parameters:
+        crvA (GUID): First base curve.
+        crvB (GUID): Second base curve.
+        pattern (str): A string pattern defining the sequence (e.g. "AABB", "AB").
+        layer_height (float): The vertical distance between each layer.
+        total_height (float): The total height to reach.
+
+    Returns:
+        list: A list of curve GUIDs forming the stacked pattern.
+    """
+
+    if not crvA or not crvB:
+        raise ValueError("Both crvA and crvB must be valid curve objects.")
+    
+    curves = []
+    z = 0.0
+    pattern_index = 0
+    pattern = pattern.upper()
+
+    base_curves = {'A': crvA, 'B': crvB}
+
+    while z < total_height:
+        key = pattern[pattern_index % len(pattern)]
+        base_crv = base_curves.get(key)
+
+        if base_crv:
+            move_vec = rs.VectorCreate((0, 0, z), (0, 0, 0))
+            new_crv = rs.CopyObject(base_crv, move_vec)
+            curves.append(new_crv)
+            z += layer_height
+
+        pattern_index += 1
+
+    return curves

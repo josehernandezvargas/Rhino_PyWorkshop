@@ -64,24 +64,34 @@ def sample_surface_color(pt, surface, image_path, as_hsl=False):
         # Return (R, G, B)
         return color.R, color.G, color.B
 
-def remap_rgb_channels(rgb, *channel_ranges):
+def remap_rgb_channels(rgb, channel_ranges):
     """
-    General remapping of RGB channels to value ranges.
+    Remaps RGB channels to value ranges.
 
     Parameters:
         rgb (tuple): RGB tuple (R, G, B), each 0–255.
-        *channel_ranges: Three tuples, each (min, max), corresponding to
-        remap targets for R, G, B channels.
+        channel_ranges: Three tuples, each (min, max), corresponding to
+                         remap targets for R, G, B channels.
 
     Returns:
         tuple: Remapped float values, one per channel.
 
-    Example:
-        >>> rgb_to_parameters((128, 64, 255), (2, 5), (0.5, 1.5), (0, 2))
-        (3.5, 0.75, 2.0)
-    """
+    TODO: add example
 
-    r, g, b = rgb
+    """
+    if len(channel_ranges) != 3:
+        raise ValueError("Expected remap ranges for R, G and B channels.")
+    try:
+        r, g, b = rgb
+    except Exception as exc:
+        raise ValueError("RGB input must unpack into three values.") from exc
+    for value in (r, g, b):
+        if not isinstance(value, (int, float)) or not 0 <= value <= 255:
+            raise ValueError("RGB values must be numbers between 0 and 255.")
+    
+
+    range_1, range_2, range_3 = channel_ranges
+
     param1 = gl.remap(0, 255, *range_1, r)
     param2 = gl.remap(0, 255, *range_2, g)
     param3 = gl.remap(0, 255, *range_3, b)

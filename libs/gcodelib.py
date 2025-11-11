@@ -4,6 +4,7 @@ import rhinoscriptsyntax as rs
 import json
 import os
 import math
+import Grasshopper as gh
 
 class GCodeLib:
     def __init__(self, filename, machine_file):
@@ -74,6 +75,8 @@ class GCodeLib:
             self.maxz = bbox[6][2]
     
     def check_print(self):
+
+        maxheight = self.machine['build_volume']['z']
 
         if self.part is None:
             raise ValueError("Part dimensions not set. Please run get_part_dims() before adding a header.")

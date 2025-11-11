@@ -129,7 +129,7 @@ class KukaKRL:
         """Wait for a specified amount of time."""
         self.code.append(f"WAIT SEC {wait_time}")
 
-    def ptp(self, position: tuple):
+    def ptp(self, position: tuple, e1: float = 0, e2: float = 0):
         """Point-to-point motion to a specified position with optional external axes."""
         if len(position) != 6:
             raise ValueError("Position must be a tuple with 6 values (X, Y, Z, A, B, C).")

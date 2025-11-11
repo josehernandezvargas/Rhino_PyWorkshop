@@ -26,9 +26,11 @@ def lerppts( a , b , t):
     """"
     Creates a linear interpolation between two points
     Returns the value for a parameter t in the range a - b"""
-    x = (( 1 - t ) * a[0] + b[0] * t )
-    y = (( 1 - t ) * a.Y + b.Y * t )
-    z = (( 1 - t ) * a.Z + b.Z * t )
+    ax, ay, az = a[0], a[1], a[2]
+    bx, by, bz = b[0], b[1], b[2]
+    x = ( 1 - t ) * ax + bx * t
+    y = ( 1 - t ) * ay + by * t
+    z = ( 1 - t ) * az + bz * t
     return (rs.AddPoint(x,y,z))
 
 def minmaxcaplist(lo, hi, t):
@@ -54,6 +56,19 @@ def flattenlist(list):
             point = rs.CreatePoint(j)
             flatlist.append(point)
     return(flatlist)
+
+def normalize_pattern(pattern):
+    if not pattern:
+        return [False]
+    normalized = []
+    for p in pattern:
+        if p in [0, False, '0', 'A', 'a']:
+            normalized.append(False)
+        elif p in [1, True, '1', 'B', 'b']:
+            normalized.append(True)
+        else:
+            raise ValueError(f"Invalid pattern value: {p}")
+    return normalized
 
 
 def shortestangle(a1, a2):
