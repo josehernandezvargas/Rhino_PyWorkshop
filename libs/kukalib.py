@@ -1,7 +1,10 @@
 #! python
 
 __author__ = "jose hernandez vargas"
-__version__ = "2024-06-26"
+__version__ = "2026-01-05"
+
+import os
+import warnings
 
 class KukaKRL:
 
@@ -147,13 +150,37 @@ class KukaKRL:
             f"LIN {{X {x:.1f}, Y {y:.1f}, Z {z:.1f}, A {a:.2f}, B {b:.2f}, C {c:.2f}, E1 {0}, E2 {0}}} C_DIS"
         )
 
+    def _truncate_filename(self, filename: str, max_length: int = 24):
+        base_name = os.path.basename(filename)
+        if len(base_name) <= max_length:
+            return filename, None
+
+        root, ext = os.path.splitext(base_name)
+        max_root_len = max_length - len(ext)
+        if max_root_len <= 0:
+            truncated_base = base_name[:max_length]
+        else:
+            truncated_base = root[:max_root_len] + ext
+
+        warnings.warn(
+            f'Filename "{base_name}" exceeds {max_length} characters; truncating to "{truncated_base}".',
+            UserWarning,
+        )
+
+        truncated_path = os.path.join(os.path.dirname(filename), truncated_base)
+        return truncated_path, base_name
+
     def write_file(self, filename):
+
+        truncated_filename, original_name = self._truncate_filename(filename)
+        if original_name:
+            self.add_comment(f"FULLNAME {filename}")
 
         # Since we are done adding lines to the program, we will END it
         self.code.append("END")
 
         # Write each line of the KUKA src program to the specified file
-        fileOut = open(filename, "w")
+        fileOut = open(truncated_filename, "w")
         for line in range(len(self.code)-1):
             fileOut.write(self.code[line] + "\n")
 

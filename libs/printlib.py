@@ -268,3 +268,9 @@ def stack_curves_by_pattern(crvA, crvB, pattern="AB", layer_height=1.0, total_he
         pattern_index += 1
 
     return curves
+
+def calculate_flow(nozzle, layerheight, filament):
+    narea = (((nozzle / 2) ** 2) * math.pi) # nozzle area
+    filarea = (((filament / 2) ** 2) * math.pi) # filament area
+    flow = (nozzle * layerheight) / filarea * 10 # flow rate
+    return(flow)

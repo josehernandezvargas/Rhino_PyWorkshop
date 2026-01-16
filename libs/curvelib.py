@@ -1,4 +1,6 @@
 
+from tracemalloc import start
+from turtle import st
 import rhinoscriptsyntax as rs
 import geometrylib as gl
 import math
@@ -86,7 +88,7 @@ def vectorsdl(start, dir, length):
     Returns
         a vector with the specified direction and length
     """
-    vector = rs.VectorUnitize(rs.VectorCreate(start, dir))
+    vector = rs.VectorUnitize(dir)
     vector = rs.VectorScale(vector, length)
     return (vector)
 
@@ -108,6 +110,23 @@ def centercrv(start, end, length):
     newstart = rs.CopyObject(mid, -vect)  # first half
     newend = rs.CopyObject(mid, vect)  # second half
     result = rs.AddLine(newstart, newend)
+    return(result)
+
+def centercrv_dir(mid, dir, length):
+    """
+    Creates a line from a mid point, direction and length
+    
+    Arguments
+        mid: mid point of the line
+        dir: direction vector
+        length: Length of the desired line
+    Returns
+        line
+    """
+    vect = vectorsdl(mid, dir, length/2)  # creates a vector to half the size
+    startpt = rs.CopyObject(mid, -vect)  # first half
+    endpt = rs.CopyObject(mid, vect)  # second half
+    result = rs.AddLine(startpt, endpt)
     return(result)
 
 
@@ -309,3 +328,52 @@ def rounded_rectangle(width, height, subdivisions, return_polyline=False):
     points.append(points[0])  # close the polyline
     polyline = rs.AddPolyline(points)
     return polyline
+
+def offset_crv_both_sides(crv, offset_distance, style=1, cap_style=1):
+    """Offsets a curve on both sides by a specified distance.
+    
+    Parameters:
+        crv: The curve to offset (GUID).
+        offset_distance: The distance to offset the curve (float).
+        style: Offset style (int), default is 1 = sharp.
+        0 = None
+        1 = Sharp
+        2 = Round
+        3 = Smooth
+        4 = Chamfer
+        cap_style: Cap style for open curves (int), default is 0 = flat.
+        0 = Flat
+        1 = Round
+        2 = Square
+    Returns:
+        A tuple containing the two offset curves (left, right) or None if offset fails.
+    """
+    left_offset = rs.OffsetCurve(crv, (0,0,1), offset_distance, style=style)
+    right_offset = rs.OffsetCurve(crv, (0,0,1), -offset_distance, style=style)
+
+    if rs.IsCurveClosed(crv):
+        cap_style = 0  # no caps for closed curves
+
+    if cap_style == 0:  # flat cap
+        start_cap = rs.AddLine(rs.CurveStartPoint(left_offset), rs.CurveStartPoint(right_offset))
+        end_cap= rs.AddLine(rs.CurveEndPoint(left_offset), rs.CurveEndPoint(right_offset))
+    elif cap_style == 1:  # round cap
+        start_tangent = rs.CurveTangent(crv, rs.CurveParameter(crv, 0))
+        end_tangent = rs.CurveTangent(crv, rs.CurveParameter(crv, 1))
+        cap_pt_start = rs.CopyObject(rs.CurveStartPoint(crv), -rs.VectorUnitize(start_tangent)*offset_distance)
+        cap_pt_end = rs.CopyObject(rs.CurveEndPoint(crv), rs.VectorUnitize(end_tangent)*offset_distance)
+        start_cap = rs.AddArc3Pt(rs.CurveStartPoint(left_offset), rs.CurveStartPoint(right_offset),cap_pt_start)
+        end_cap = rs.AddArc3Pt(rs.CurveEndPoint(right_offset), rs.CurveEndPoint(left_offset),cap_pt_end)
+    elif cap_style == 2:  # rectangular cap
+        start_tangent = rs.CurveTangent(crv, rs.CurveParameter(crv, 0))
+        end_tangent = rs.CurveTangent(crv, rs.CurveParameter(crv, 1))
+        cap_line_start = rs.CopyObject(rs.AddLine(rs.CurveStartPoint(left_offset), rs.CurveStartPoint(right_offset)), -rs.VectorUnitize(start_tangent)*offset_distance)
+        cap_line_end = rs.CopyObject(rs.AddLine(rs.CurveEndPoint(left_offset), rs.CurveEndPoint(right_offset)), rs.VectorUnitize(end_tangent)*offset_distance)
+        start_cap = rs.AddPolyline([rs.CurveStartPoint(left_offset), rs.CurveStartPoint(cap_line_start), rs.CurveEndPoint(cap_line_start), rs.CurveStartPoint(right_offset)])
+        end_cap = rs.AddPolyline([rs.CurveEndPoint(left_offset), rs.CurveStartPoint(cap_line_end), rs.CurveEndPoint(cap_line_end), rs.CurveEndPoint(right_offset)])
+    
+    if left_offset and right_offset:
+        return (rs.JoinCurves([left_offset, end_cap, right_offset, start_cap]))
+    else:
+        print("Offset failed on one or both sides.")
+        return None
