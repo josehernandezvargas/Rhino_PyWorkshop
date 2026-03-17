@@ -35,6 +35,26 @@ nozzle_size = 20 # mm
 layer_height = 10 # mm
 line_distance = nozzle_size * (1 - overlap/100)  # adjusted line distance with overlap
 
+def create_wall_indent(crv, param, width, depth, angle):
+	
+	"""Procedurally creates intentations on a wall surface
+	
+	Inputs:
+
+	Outputs:
+	
+	"""
+	base_pt = rs.EvaluateCurve(crv, param)
+	tangent = rs.VectorUnitize(rs.CurveTangent(crv, param))
+	normal = rs.VectorUnitize(rs.CurveNormal(crv, param))
+	angled_normal = rs.VectorRotate(normal, angle, [0,0,1])
+
+	pt_before = rs.EvaluateCurve(rs.CurveClosestPoint(rs.CopyObject(base_pt, tangent * width/2)))
+	pt_after = rs.EvaluateCurve(rs.CurveClosestPoint(rs.CopyObject(base_pt, tangent * -width/2)))
+	pt_int_before = rs.CopyObject(rs.pt_before, angled_normal * depth)
+	pt_int_after = rs.CopyObject(rs.pt_after, angled_normal * depth)
+	return (pt_before, pt_int_before, pt_int_after, pt_after)
+
 def create_truss_wall(base_rect, shift, truss_distance, overlap, vent_width, truss_contact):
 	# rectangle vertices
 	A, B, C, D = rs.CurvePoints(base_rect)[:4]
@@ -105,11 +125,22 @@ def create_truss_wall(base_rect, shift, truss_distance, overlap, vent_width, tru
 z_vector = (0,0,layer_height)
 
 output = []
+segments = []
 for i in range(50):
 	shift = (i / 50)  # shift from 0 to 1 
 	input_rect = rs.CopyObject(base_rect, rs.VectorScale(z_vector, i))
 	layer = create_truss_wall(input_rect, shift, truss_distance, overlap, vent_width, truss_contact)
 	# polyline = rs.AddPolyline(layer)
 	output.append(layer)
+	# layer_segmments = rs.ExplodeCurves(polyline)
+	# segments.append(layer_segmments[4])
+
+# TODO: 260119
+# test extracting a segment stack in a separate script
+# test fn create wall indent and provide a simple pattern
+# implement triangle pattern
+# review and import methods for graded porosity
+# fix truss constructor
 
 a = th.list_to_tree(output)
+b = th.list_to_tree(segments)
