@@ -1,8 +1,56 @@
+import Rhino
 import rhinoscriptsyntax as rs
+import System
 from System.Drawing import Bitmap
 from itertools import cycle
 import geometrylib as gl
+import iolib as io
 import math
+
+
+def _coerce_bitmap(image_source):
+    """Return a Bitmap from a file path or an existing bitmap-like input."""
+    if isinstance(image_source, Bitmap):
+        return image_source
+    if hasattr(image_source, "Width") and hasattr(image_source, "Height") and hasattr(image_source, "GetPixel"):
+        return image_source
+    return Bitmap(image_source)
+
+
+def _surface_domains_and_uv(surface, pt3d):
+    """Resolve closest UV and domains for Rhino GUIDs or RhinoCommon surfaces/breps."""
+    if isinstance(surface, (str, System.Guid)):
+        uv = rs.SurfaceClosestPoint(surface, pt3d)
+        u_dom = rs.SurfaceDomain(surface, 0)
+        v_dom = rs.SurfaceDomain(surface, 1)
+        return uv, u_dom, v_dom
+
+    if isinstance(surface, Rhino.Geometry.Surface):
+        success, u, v = surface.ClosestPoint(pt3d)
+        if not success:
+            raise ValueError("Could not find closest point on the input surface.")
+        u_dom = surface.Domain(0)
+        v_dom = surface.Domain(1)
+        return (u, v), (u_dom.T0, u_dom.T1), (v_dom.T0, v_dom.T1)
+
+    if isinstance(surface, Rhino.Geometry.Brep):
+        success, u, v, face_index = surface.ClosestPoint(pt3d)
+        if not success or face_index < 0:
+            raise ValueError("Could not find closest point on the input brep.")
+        face = surface.Faces[face_index]
+        u_dom = face.Domain(0)
+        v_dom = face.Domain(1)
+        return (u, v), (u_dom.T0, u_dom.T1), (v_dom.T0, v_dom.T1)
+
+    coerced_brep = rs.coercebrep(surface, False)
+    if coerced_brep:
+        return _surface_domains_and_uv(coerced_brep, pt3d)
+
+    coerced_surface = rs.coercesurface(surface, False)
+    if coerced_surface:
+        return _surface_domains_and_uv(coerced_surface, pt3d)
+
+    raise TypeError("Surface input must be a Rhino surface, brep, or Guid.")
 
 def closest_srf(pt, srf0, srf1):
     """returns the surface that is closest to a certain point"""
@@ -35,14 +83,10 @@ def sample_surface_color(pt, surface, image_path, as_hsl=False):
     pt3d = rs.coerce3dpoint(pt)
 
     # Load the image
-    img = Bitmap(image_path)
+    img = _coerce_bitmap(image_path)
 
     # Find UV parameter on surface for closest point
-    u, v = rs.SurfaceClosestPoint(surface, pt3d)
-
-    # Surface domains in U and V
-    u_dom = rs.SurfaceDomain(surface, 0)
-    v_dom = rs.SurfaceDomain(surface, 1)
+    (u, v), u_dom, v_dom = _surface_domains_and_uv(surface, pt3d)
 
     # Image dimensions
     img_w = img.Width
@@ -85,10 +129,9 @@ def remap_rgb_channels(rgb, channel_ranges):
         r, g, b = rgb
     except Exception as exc:
         raise ValueError("RGB input must unpack into three values.") from exc
-    for value in (r, g, b):
-        if not isinstance(value, (int, float)) or not 0 <= value <= 255:
-            raise ValueError("RGB values must be numbers between 0 and 255.")
-    
+    for channel_name, value in (("R", r), ("G", g), ("B", b)):
+        io.validate_scalar(channel_name, value, min_value=0, max_value=255, allow_zero=True)
+
 
     range_1, range_2, range_3 = channel_ranges
 
@@ -215,33 +258,32 @@ def evaluate_parameter(mode, settings, pt, rgb):
     else:
         raise ValueError("Unknown source mode")
 
+def _gradient_factor(mode, t):
+    """Return a normalized gradient factor for linear/reverse/peak/valley modes."""
+    if mode == 'linear':
+        return t
+    if mode == 'reverse':
+        return 1 - t
+    if mode == 'peak':
+        return 2 * t if t <= 0.5 else 2 * (1 - t)
+    if mode == 'valley':
+        return 1 - (2 * t if t <= 0.5 else 2 * (1 - t))
+    raise ValueError("Invalid gradient mode.")
+
+
 def build_gradient_pattern(crvs, mode='linear', min_val=0.0, max_val=1.0):
     """
     Build deterministic boolean pattern with flexible gradients.
     Modes: 'linear', 'reverse', 'peak', 'valley'
     """
-    print("starting build_gradient_pattern")
     N = len(crvs)
-    print("Number of curves:", N)
-
     if N <= 1: # Prevents division by zero
-        return [False] * N  
+        return [False] * N
 
     pattern = []
-
     for i in range(N):
-        t = i / (N - 1) 
-
-        if mode == 'linear':
-            value = t
-        elif mode == 'reverse':
-            value = 1 - t
-        elif mode == 'peak':
-            value = 2 * t if t <= 0.5 else 2 * (1 - t)
-        elif mode == 'valley':
-            value = 1 - (2 * t if t <= 0.5 else 2 * (1 - t))
-        else:
-            raise ValueError("Invalid gradient mode.")
+        t = i / (N - 1)
+        value = _gradient_factor(mode, t)
 
         # Apply threshold logic
         if value < min_val:
@@ -250,14 +292,6 @@ def build_gradient_pattern(crvs, mode='linear', min_val=0.0, max_val=1.0):
             pattern.append(True)
         else:
             pattern.append(i % 2 == 1)
-    for i in range(N):
-        t = i / (N-1)
-        if t < 0.33:
-            pattern.append(False)
-        elif t < 0.66:
-            pattern.append(i % 2 == 1)
-        else:
-            pattern.append(True)
     return pattern
 
 def build_stack_pattern(crvs, mode='gradient', sequence=None, gradient_mode='linear', min_val=0.0, max_val=1.0):
@@ -267,29 +301,16 @@ def build_stack_pattern(crvs, mode='gradient', sequence=None, gradient_mode='lin
     if N == 1:
         return [False]
 
-    pattern = []
-
     if mode == 'sequence':
         if not sequence:
             raise ValueError("Sequence mode requires a valid sequence list.")
         seq_length = len(sequence)
-        for i in range(N):
-            symbol = sequence[i % seq_length]
-            pattern.append(bool(symbol))
-        return pattern
+        return [bool(sequence[i % seq_length]) for i in range(N)]
 
+    pattern = []
     for i in range(N):
         t = i / (N - 1)
-        if gradient_mode == 'linear':
-            value = t
-        elif gradient_mode == 'reverse':
-            value = 1 - t
-        elif gradient_mode == 'peak':
-            value = 2 * t if t <= 0.5 else 2 * (1 - t)
-        elif gradient_mode == 'valley':
-            value = 1 - (2 * t if t <= 0.5 else 2 * (1 - t))
-        else:
-            raise ValueError("Invalid gradient mode.")
+        value = _gradient_factor(gradient_mode, t)
         if value < min_val:
             pattern.append(False)
         elif value > max_val:

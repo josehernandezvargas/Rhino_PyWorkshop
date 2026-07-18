@@ -7,14 +7,16 @@ __author__ = "jose hernandez vargas"
 __version__ = "2026-01-15"
 
 import System
+import Rhino
 import rhinoscriptsyntax as rs # type: ignore
 import Grasshopper as gh
 import os
+import time
+import math
+import json
 from itertools import chain
 import printlib as pl
 import gcodelib as gcl
-import geometrylib as gl
-import iolib as io
 
 
 ghenv.Component.Name = "Ultimaker 2 exporter"
@@ -35,6 +37,16 @@ def _is_number(value):
 
 def _add_runtime_message(level, message):
     ghenv.Component.AddRuntimeMessage(level, message)
+
+def _load_machine_properties(machine_id):
+    current_dir = os.path.dirname(os.path.abspath(gcl.__file__))
+    parent_dir = os.path.dirname(current_dir)
+    machine_file = os.path.join(parent_dir, "machine_settings", f"{machine_id}.json")
+    try:
+        with open(machine_file, "r") as file_handle:
+            return json.load(file_handle)
+    except (IOError, ValueError) as exc:
+        raise ValueError(f"Error loading machine properties from {machine_file}: {exc}")
 
 def _get_curve_plane_z(curve):
     crv_obj = rs.coercecurve(curve)
@@ -95,8 +107,8 @@ except NameError:
     warnings.append("test_line_offset not provided; defaulting to 20 mm.")
 
 try:
-    machine = gcl.load_machine_properties(machine_id)
-except io.ValidationError as exc:
+    machine = _load_machine_properties(machine_id)
+except ValueError as exc:
     errors.append(str(exc))
     machine = None
 
@@ -117,8 +129,8 @@ except (TypeError, ValueError):
 
 zero = nozzle / 2 if _is_number(nozzle) else 0.0
 
-timestamp = gl.timestamp()  # adds a timestamp with the date
-hourstamp = " at " + gl.timestamp(format=3)  # a timestamp with the hour
+timestamp = time.strftime("%Y%m%d")  # adds a timestamp with the date
+hourstamp = " at " + time.strftime("%X")  # a timestamp with the hour
 
 if toolpath is None:
     errors.append("toolpath is required.")
@@ -144,6 +156,8 @@ if not isinstance(filename, str) or not filename.strip():
     errors.append("filename must be a non-empty string.")
 if not isinstance(save, bool):
     errors.append("save must be a boolean.")
+# if not isinstance(variableflow, bool):
+#     errors.append("variableflow must be a boolean.")
 if "F" in globals():
     if not _is_number(F) or F <= 0:
         errors.append("F must be a positive number when provided.")
@@ -168,6 +182,12 @@ if machine:
 if can_generate:
     toolpath = pl.centerobject(toolpath_list, buildplate=(build_x, build_y))
     toolpath = pl.leveltoplatform(toolpath)
+# ctoolpath = pl.centerobject(ctoolpath)
+
+# HACK: disabled mesh
+# if mesh:
+#     mesh = leveltoplatform2(mesh)
+#     mesh = centerobject2(mesh)
 
     bbox = rs.BoundingBox(toolpath)
 
@@ -198,6 +218,16 @@ if can_generate:
                 gh.Kernel.GH_RuntimeMessageLevel.Warning,
                 "Toolpath order adjusted to increase by curve plane Z.",
             )
+
+
+# if minz >= 1:
+#    warning = "Flying model! (not attached to the buildplate)"
+#    ghenv.Component.AddRuntimeMessage(gh.Kernel.GH_RuntimeMessageLevel.Warning, warning)
+
+# G code utilities
+
+
+# ###
 
     fits_buildplate = True
     if minx < 0 or miny < 0 or maxx > build_x or maxy > build_y:
@@ -234,13 +264,35 @@ if can_generate:
         )
 
 if can_generate:
-    header = gcl.build_header(
-        machine, nozzle, flow, (minx, miny, minz, maxx, maxy, maxz),
-        timestamp=timestamp, hourstamp=hourstamp,
-    )
+    header.append(f";FLAVOR:{machine['gcode_flavour']}")
+    header.append(";MATERIAL:1")
+    header.append(";MATERIAL2:0")
+    header.append(f";TARGET_MACHINE.NAME:{machine['machine_name']}")
+    header.append(";NOZZLE_DIAMETER:" + str(nozzle))
+    header.append(";MINX:" + str(minx))
+    header.append(";MINY:" + str(miny))
+    header.append(";MINZ:" + str(minz))
+    header.append(";MAXX:" + str(maxx))
+    header.append(";MAXY:" + str(maxy))
+    header.append(";MAXZ:" + str(maxz))
+    header.append(";Generated with Python / GH")
+    header.append(";File created " + timestamp )
+    header.append(";" + hourstamp)
+    header.append(";OVERFLOW: " + str(flow))
+    header.append("M82 ;absolute extrusion mode")
+    header.append(";END_OF_HEADER")
+
+# TODO: move to printlib
+def calculate_flow(nozzle, layerheight, filament):
+    narea = (((nozzle / 2) ** 2) * math.pi) # nozzle area
+    filarea = (((filament / 2) ** 2) * math.pi) # filament area
+    flow = (nozzle * layerheight) / filarea * 10 # flow rate
+    return(flow)
+
+
 
 if can_generate:
-    materialflow = gcl.calculate_flow(nozzle, layerheight, filament)
+    materialflow = calculate_flow(nozzle, layerheight, filament)
 
 # Feedrates
 
@@ -264,7 +316,7 @@ if can_generate:
     ini.append("M109 S205")
     ini.append("G0 F12000 X5 Y5 Z20")
     ini.append("G280")
-    ini.append(gcl.retract())
+    ini.append("G10")
 
     if test_line_enabled:
         line_y = miny - test_line_offset
@@ -274,50 +326,88 @@ if can_generate:
         line_end = (line_center_x + half_len, line_y, 0)
         preview_objects.append(rs.AddLine(line_start, line_end))
         gcode.append("; TEST_LINE START")
-        gcode.append(gcl.travel_move(line_start, feedrate=F0))
-        gcode.append(gcl.print_move(line_end, test_line_length * materialflow, feedrate=F1))
-        gcode.append(gcl.travel_move(line_start, feedrate=F0))
+        gcode.append(pl.gcodeline(0, pt=line_start, f=F0))
+        gcode.append(pl.gcodeline(1, pt=line_end, e=test_line_length * materialflow, f=F1))
+        gcode.append(pl.gcodeline(0, pt=line_start, f=F0))
         gcode.append("; TEST_LINE END")
         gcode.append("G92 E0")
 
+# HACK: disabled mesh
+# Evaluate the colour in a reference mesh
+# if mesh:
+#     meshcol = rs.MeshVertexColors(mesh)
+#     meshvert = rs.MeshVertices(mesh)
+
+
 if can_generate:
+    tol = rs.UnitAbsoluteTolerance()
     tol2 = 1 # 1 mm tolerance for closing loops
     for i, crv in enumerate(toolpath):
         # Efficient polyline conversion (obs. not compatible with variable flow)
-        points = gcl.curve_to_polyline_points(crv, angle_tolerance=5.0, tolerance=1.0, min_edge_length=1.0)
+        polyline_crv = rs.ConvertCurveToPolyline(crv, angle_tolerance=5.0, tolerance=1.0, delete_input=False, min_edge_length =1.0)
+        points = rs.PolylineVertices(polyline_crv)
         # reverse every other curve if the curve is not closed
         if i != 0:
             if _get_curve_plane_z(toolpath[i]) == _get_curve_plane_z(toolpath[i-1]):
                 dist_last_pt = rs.Distance(rs.CurveEndPoint(toolpath[i]), rs.CurveEndPoint(toolpath[i-1]))
                 if not rs.IsCurveClosed(crv) and dist_last_pt >= tol2 and len(points) > 1:
                     points.reverse()
-
+        # points = rs.DivideCurveLength(crv, 1)  # Divide the curve in 1mm segments
+        # reverse every other curve if the curve is not closed
+        # if len(points) > 1:
+        #     first_pt = points[0]
+        #     last_pt = points[-1]
+        #     dx = first_pt[0] - last_pt[0]
+        #     dy = first_pt[1] - last_pt[1]
+        #     dz = first_pt[2] - last_pt[2]
+        #     if (dx * dx) + (dy * dy) + (dz * dz) > tol2 and i % 2 == 1:
+        #         points.reverse()
+        
         gcode.append(";TYPE:WALL-OUTER")
         gcode.append(";LAYER_COUNT:" + str(len(toolpath)))
         gcode.append(";LAYER:" + str(i))
         for j, pt in enumerate(points):
             if pt[2]>= 2:  # if printing height >= 2 mm start the fans
                 gcode.append("M106; Turn fans on") # turn on the fans after first layer
+            # DISABLED: Variable flow by distance
+            # varflow = pl.selfclosestpt2(points, i, 4) / nozzle
+            # Variable flow by density map
+            # HACK: disabled mesh
+            # if mesh:
+            #     meshindex = rs.PointArrayClosestPoint(meshvert, pt)
+            #     # FIXME: uses just the red channel for now
+            #     colour = meshcol[meshindex].R / 255
+            #     # FIXME: to function: map variation from 0,2 to 1
+            #     varflow = (colour*.5) + 0.5
+            # end variable flow
+            # if variableflow:
+            #     ext = varflow * materialflow + ext
+            # else:
 
             previewpts.append(pt)
             previewflow.append(materialflow)
             if j == 0:
                 # first point
                 if first == 0:  # first point in the first curve only
-                    gline = gcl.gcodeline(0, pt, f=F1)
-                    gcode.append(gcl.unretract())
+                    # gline = gcline(0, F0, pt)
+                    gline = pl.gcodeline(0,pt,f=F1)
+                    gcode.append("G11") # unretract
                     first = 1
                 else:  # first point of subsequent curves
-                    gline = gcl.gcodeline(1, pt, f=F0)
+                    # gline = gcline(1, F1, pt)
+                    gline = pl.gcodeline(1, pt, f=F0)
                 gcode.append(gline)
             else:
+                # gline = gcline(1, F1, pt, ext)
                 ext += materialflow * rs.Distance(points[j], points[j - 1])
-                gline = gcl.gcodeline(1, pt, f=F1, e=ext)
+                gline = pl.gcodeline(1, pt, f=F1, e=ext)
                 gcode.append(gline)
+            # print(pt, gline)
+        # gcode.append("G10") # retract
 
 footer = []
 
-footer.append(gcl.retract())
+footer.append("G10")
 footer.append("M107; turn fans off")
 footer.append(";M82 ;absolute extrusion mode")
 footer.append(";End of Gcode")
@@ -331,14 +421,29 @@ if can_generate and previewpts:
     est = rs.CurveLength(preview_objects[0]) / F1 * 60
     header.insert(1, ";TIME:{:.0f}".format(est))
 
-    commands = list(chain(ini, gcode, footer))
+    gcodelines = chain(header, ini, gcode, footer)
+    lines = [line for line in gcodelines]
 
     # saves file in a /gcode subfolder. It will be created if it doesn't exist
     base_dir = os.path.dirname(os.path.realpath(ghdoc.Path))
     gcode_dir = os.path.join(base_dir, "gcode")
+    if not os.path.isdir(gcode_dir):
+        os.makedirs(gcode_dir)
+
+    extension = ".gcode"
+    #if "." not in ext: ext = "." + ext
+    # else: pass
+
+    # if os.path.exists(file) == False: # Test if file already exists; if it doesn't, proceed
+    file = os.path.join(gcode_dir, timestamp + "_" + filename + extension)
+    # if os.path.exists(file) == True: # If it does exists, follow the next steps
+    #    file_count = len([f for f in os.walk(".").next()[2] if f[-4:] == ext]) # Find all files with the same extension
+    #    file = timestamp + name + "_" + str(file_count) + ext # Add the number to the new file name as a differentiator
 
     if save:
-        file = gcl.save_gcode_file(gcode_dir, filename, header, commands, timestamp=timestamp)
+        with open(file, "w") as filePath:  # Open the file
+            for line in lines:  # Iterate through lines
+                filePath.write(line + "\n")  # Write separate lines
 
         # print the filepath and a timestamp with the hour
         print('File Saved  ' + file + hourstamp)

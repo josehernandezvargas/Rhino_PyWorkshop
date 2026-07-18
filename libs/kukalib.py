@@ -6,6 +6,8 @@ __version__ = "2026-01-05"
 import os
 import warnings
 
+import iolib as io
+
 class KukaKRL:
 
     def __init__(self, name):
@@ -32,23 +34,61 @@ class KukaKRL:
             print(
                 f"Speed is defined in m/s. Provided speed is {velocity} m/s. Please check the units")
         self.code.append(f"$VEL.CP={velocity}")
+
+    def _validate_percent(self, value: float, label: str, min_value: float = 0, max_value: float = 100):
+        """Validate percent-like inputs and return a float."""
+        return io.validate_scalar(label, value, min_value=min_value, max_value=max_value, allow_zero=False)
+
+    def _sanitize_ptp_velocity_percent(self, value: float):
+        """
+        Validate PTP speed percent for safer motion.
+
+        Warn above 20% and cap at 50% as a hard safety limit.
+        """
+        value = self._validate_percent(value, "PTP velocity percent", min_value=0, max_value=100)
+        if value > 20:
+            warnings.warn(
+                f"PTP velocity is {value}%; values above 20% should be double-checked.",
+                UserWarning,
+            )
+        if value > 50:
+            warnings.warn(
+                f"PTP velocity {value}% exceeds safety cap; clamping to 50%.",
+                UserWarning,
+            )
+            value = 50.0
+        return value
     
+    def _validate_tool_or_base_number(self, number, label):
+        """Validate a tool/base number is within the KUKA-supported 1-16 range."""
+        io.validate_scalar(label, number, min_value=1, max_value=16, allow_zero=True)
+
     def set_tool(self, number):
         """Defines the tool number. Accepts an integer between 1-16."""
-        if not 1 <= number <= 16:
-            raise ValueError("Tool number must be between 1 and 16.")
+        self._validate_tool_or_base_number(number, "Tool number")
         self.tool = number
-    
+
     def set_base(self, number):
         """Defines the base number. Accepts an integer between 1-16."""
-        if not 1 <= number <= 16:
-            raise ValueError("Tool number must be between 1 and 16.")
+        self._validate_tool_or_base_number(number, "Base number")
         self.base = number
 
-    def krl_header(self, startposition):
+    def krl_header(
+        self,
+        startposition,
+        ptp_velocity_percent: float = 20,
+        ptp_acc_percent: float = 20,
+        ptp_apo_dist: float = 50,
+    ):
         """
         Writes a KRL header into self.code
         requires self.tool and self.base to be defined
+
+        Args:
+            startposition: Iterable with A1..A6 start joint angles.
+            ptp_velocity_percent: PTP speed (%) for PDAT and BAS PTP params.
+            ptp_acc_percent: PTP acceleration (%) for PDAT_ACT.
+            ptp_apo_dist: Approximation distance for PDAT_ACT.
         """    
         if not self.tool or not self.base:
             raise Exception(
@@ -63,11 +103,17 @@ class KukaKRL:
         # An Array that will contain all of the commands
         base = self.base
         tool = self.tool
+        ptp_velocity_percent = self._sanitize_ptp_velocity_percent(ptp_velocity_percent)
+        ptp_acc_percent = self._validate_percent(
+            ptp_acc_percent, "PTP acceleration percent", min_value=0, max_value=100
+        )
+        if not isinstance(ptp_apo_dist, (int, float)) or ptp_apo_dist < 0:
+            raise ValueError("PTP APO distance must be a numeric value >= 0.")
 
         # header from template
         self.code.append("&ACCESS RVP")
         self.code.append("&REL 1")
-        self.code.append("&PARAM TEMPLATE = C:\KRC\Roboter\Template\\vorgabe")
+        self.code.append("&PARAM TEMPLATE = C:\\KRC\\Roboter\\Template\\vorgabe")
         self.code.append("&PARAM EDITMASK = *")
 
         # add some initial setup stuff
@@ -96,10 +142,14 @@ class KukaKRL:
         self.code.append(";FOLD STARTPOSITION - BASE IS {}, TOOL IS {}, SPEED IS 100%, POSITION IS A1 {},A2 {},A3 {},A4 {},A5 {},A6 {},E1 0,E2 0,E3 0,E4 0".format(
             base, tool, A1, A2, A3, A4, A5, A6))
         self.code.append("$BWDSTART = FALSE")
-        self.code.append("PDAT_ACT = {VEL 100,ACC 20,APO_DIST 50}")
+        self.code.append(
+            "PDAT_ACT = {{VEL {vel:.1f},ACC {acc:.1f},APO_DIST {apo:.1f}}}".format(
+                vel=ptp_velocity_percent, acc=ptp_acc_percent, apo=ptp_apo_dist
+            )
+        )
         self.code.append(
             "FDAT_ACT = {{TOOL_NO {},BASE_NO {},IPO_FRAME #BASE}}".format(tool, base))
-        self.code.append("BAS (#PTP_PARAMS,100)")
+        self.code.append("BAS (#PTP_PARAMS,{:.1f})".format(ptp_velocity_percent))
         self.code.append("PTP  {{A1 {},A2 {},A3 {},A4 {},A5 {},A6 {},E1 0,E2 0,E3 0,E4 0}}".format(
             A1, A2, A3, A4, A5, A6))
         self.code.append(";ENDFOLD")
@@ -172,16 +222,19 @@ class KukaKRL:
 
     def write_file(self, filename):
 
-        truncated_filename, original_name = self._truncate_filename(filename)
-        if original_name:
-            self.add_comment(f"FULLNAME {filename}")
+        if len(os.path.basename(filename)) > 24:
+            truncated_filename, _original_filename = self._truncate_filename(filename)
+            self.add_comment(f"FULLNAME: {filename}")
+        else:
+            truncated_filename = filename
+            
 
         # Since we are done adding lines to the program, we will END it
         self.code.append("END")
 
         # Write each line of the KUKA src program to the specified file
-        fileOut = open(truncated_filename, "w")
-        for line in range(len(self.code)-1):
-            fileOut.write(self.code[line] + "\n")
+        with open(truncated_filename, "w") as fileOut:
+            for line in range(len(self.code)-1):
+                fileOut.write(self.code[line] + "\n")
 
-        fileOut.write(self.code[-1])
+            fileOut.write(self.code[-1])

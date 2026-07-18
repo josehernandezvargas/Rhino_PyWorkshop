@@ -1,6 +1,8 @@
 import rhinoscriptsyntax as rs
-from curvelib import centercrv
-import math
+from curvelib import centercrv, curveselfintersection
+import geometrylib as gl
+import gcodelib as gcl
+import iolib as io
 
 
 def selfclosestpt2(pts, i, diam):
@@ -37,29 +39,6 @@ def testline(object, length, distance):
     return (line)
 
 
-def curveselfintersection(crv, *params):
-    """returns a list of self intersection points for a single curve
-    """
-    if crv:
-        intpoints = []
-        intparams = []
-        intersections = rs.CurveCurveIntersection(crv)
-        if intersections == None:
-            print("No self-intersections found")
-            print(intersections)
-        else:
-            for i, intpt in enumerate(intersections):
-                if intpt[0] == 1:
-                    intpoints.append(intpt[1])
-                    intparams.append(intpt[5])
-                else:
-                    print("curve overlap")
-        if params:
-            return (intparams)
-        else:
-            return (intpoints)
-
-
 def leveltoplatform(input, height=0):
     """
     Moves the input geometry to be in touch with the platform
@@ -75,13 +54,7 @@ def leveltoplatform(input, height=0):
         Geometry at the specified height
     """
 
-    bbox = rs.BoundingBox(input)
-    minx = bbox[0][0]
-    miny = bbox[0][1]
-    minz = bbox[0][2]
-    maxx = bbox[6][0]
-    maxy = bbox[6][1]
-    maxz = bbox[6][2]
+    minx, miny, minz, maxx, maxy, maxz = gl.bbox_bounds(input)
     disp = height - minz
     vector = rs.CreateVector(0, 0, disp)
     if type(input) is list:
@@ -108,13 +81,7 @@ def centerobject(input, buildplate=(223, 223), delta=False):
         Geometry centred on the platform
     """
 
-    bbox = rs.BoundingBox(input)
-    minx = bbox[0][0]
-    miny = bbox[0][1]
-    minz = bbox[0][2]
-    maxx = bbox[6][0]
-    maxy = bbox[6][1]
-    maxz = bbox[6][2]
+    minx, miny, minz, maxx, maxy, maxz = gl.bbox_bounds(input)
     centrex = (minx + maxx) / 2  # part midpoint in x and y
     centrey = (miny + maxy) / 2
     if delta:
@@ -135,30 +102,12 @@ def centerobject(input, buildplate=(223, 223), delta=False):
 
 def gcodeline(g, pt=None, x=None, y=None, z=None, f=None, e=None, v=None):
     """
-    Creates a line of gcode from a variable set of keyword arguments
-    pt: it can be used to define the x,y,z coordinates by a tuple
-    x,y,z values will override the values on pt if present
+    Creates a line of gcode from a variable set of keyword arguments.
+
+    Thin re-export of gcodelib.gcodeline, kept here for scripts that still
+    call pl.gcodeline(...).
     """
-    if pt and len(pt) == 3:
-        x = pt[0]
-        y = pt[1]
-        z = pt[2]
-    g = "G{}".format(int(g))
-    x = " X{:.1f}".format(float(x)) if x is not None else ""
-    y = " Y{:.1f}".format(float(y)) if y is not None else ""
-    z = " Z{:.1f}".format(float(z)) if z is not None else ""
-    e = " E{:.1f}".format(float(e)) if e is not None else ""
-    f = " F{}".format(int(f)) if f else ""
-    v = " V{:.1f}".format(float(v)) if v else ""
-    gline = g + x + y + z + v + e + f
-    return (gline)
-
-
-def caluclate_flow(nozzle, layerheight, filament):
-    narea = (((nozzle / 2) ** 2) * math.pi)  # nozzle area
-    filarea = (((filament / 2) ** 2) * math.pi)  # filament area
-    flow = (nozzle * layerheight) / filarea * 10
-    return (flow)
+    return gcl.gcodeline(g, pt=pt, x=x, y=y, z=z, f=f, e=e, v=v)
 
 
 def materialestimation(length, nozzle, unit=0):
@@ -198,8 +147,7 @@ def slice_brep_uniform(brep, layer_height, max_deviation=0.1, max_slices=1000):
     if not rs.IsBrep(brep):
         raise ValueError("Input is not a valid Brep")
 
-    if layer_height <= 0:
-        raise ValueError("Layer height must be greater than zero")
+    io.validate_scalar("Layer height", layer_height, min_value=0, allow_zero=False)
 
     bbox = rs.BoundingBox(brep)
     if not bbox:
@@ -268,9 +216,3 @@ def stack_curves_by_pattern(crvA, crvB, pattern="AB", layer_height=1.0, total_he
         pattern_index += 1
 
     return curves
-
-def calculate_flow(nozzle, layerheight, filament):
-    narea = (((nozzle / 2) ** 2) * math.pi) # nozzle area
-    filarea = (((filament / 2) ** 2) * math.pi) # filament area
-    flow = (nozzle * layerheight) / filarea * 10 # flow rate
-    return(flow)

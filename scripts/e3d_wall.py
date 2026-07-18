@@ -12,8 +12,8 @@ Inputs:
     nozzle: Optional nozzle width override. Defaults to NOZZLE.
 
 Outputs:
-    a: Grasshopper tree of closed-loop point rows for each valid layer.
-    b: Grasshopper tree of doubled segment polylines for each valid layer.
+    a: Grasshopper tree of closed wall-loop point rows for each valid layer.
+    b: Grasshopper tree of individual line segments as curves.
 """
 
 __author__ = "joseh"
@@ -139,6 +139,51 @@ def _move_point_away(point, target, distance):
     return point + vector * distance
 
 
+def _offset_segment_toward(segment, target_point, distance):
+    """Move a whole segment toward a target point by a fixed distance."""
+    start_pt = segment["start"]
+    end_pt = segment["end"]
+    mid_pt = Rhino.Geometry.Point3d(
+        0.5 * (start_pt.X + end_pt.X),
+        0.5 * (start_pt.Y + end_pt.Y),
+        0.5 * (start_pt.Z + end_pt.Z),
+    )
+    move_vector = target_point - mid_pt
+    if not move_vector.Unitize():
+        return _segment_record(start_pt, end_pt, segment["tangent"], segment["side"], segment["station_index"])
+    move_vector *= float(distance)
+    return _segment_record(
+        start_pt + move_vector,
+        end_pt + move_vector,
+        segment["tangent"],
+        segment["side"],
+        segment["station_index"],
+    )
+
+
+def _rotate90_xy(vector):
+    return Rhino.Geometry.Vector3d(-vector.Y, vector.X, 0.0)
+
+
+def _offset_connector_segment(start_pt, end_pt, hint_vector, distance):
+    """Shift a connector segment by a perpendicular XY vector.
+
+    The sign is chosen from ``hint_vector`` so DA and CB can be displaced on the
+    outside of the wall instead of toward the truss interior.
+    """
+    connector_vector = end_pt - start_pt
+    normal_vector = _rotate90_xy(connector_vector)
+    if not normal_vector.Unitize():
+        return Rhino.Geometry.Point3d(start_pt), Rhino.Geometry.Point3d(end_pt)
+
+    hint = Rhino.Geometry.Vector3d(hint_vector)
+    if hint.Unitize() and Rhino.Geometry.Vector3d.Multiply(normal_vector, hint) < 0.0:
+        normal_vector *= -1.0
+
+    offset_vector = normal_vector * float(distance)
+    return start_pt + offset_vector, end_pt + offset_vector
+
+
 def _offset_midpoint_distance(source_curve, candidate_curve):
     source_mid, _ = _curve_point_at_normalized(source_curve, 0.5)
     candidate_mid, _ = _curve_point_at_normalized(candidate_curve, 0.5)
@@ -228,127 +273,115 @@ def _sequence_segments_by_proximity(segments):
     return ordered_points
 
 
-def _build_truss_sequence(contact_segments, start_point, end_point):
-    """Primary zig-zag through all alternating segments, anchored from A to C."""
-    if not contact_segments:
-        return [start_point, end_point]
-    truss_points = [start_point]
-    ordered_segment_points = _sequence_segments_by_proximity(contact_segments)
-    _append_unique_points(truss_points, ordered_segment_points)
-    _append_unique_points(truss_points, [end_point])
-    return truss_points
+def _build_station_data(base_curve, back_curve, station_params, nozzle_value):
+    """Sample matching rail points and their one-nozzle inward offsets.
 
-
-def _build_parallel_truss_sequences(raw_segments, offset_segments, raw_start, raw_end, offset_start, offset_end):
-    """Sequence raw and offset truss segments together so the strips stay parallel."""
-    if not raw_segments or not offset_segments:
-        return [raw_start, raw_end], [offset_start, offset_end]
-
-    raw_points = [raw_start]
-    offset_points = [offset_start]
-    prev_raw = raw_start
-    prev_offset = offset_start
-
-    for raw_segment, offset_segment in zip(raw_segments, offset_segments):
-        raw_start_pt = raw_segment["start"]
-        raw_end_pt = raw_segment["end"]
-        offset_start_pt = offset_segment["start"]
-        offset_end_pt = offset_segment["end"]
-
-        same_order_cost = prev_raw.DistanceTo(raw_start_pt) + prev_offset.DistanceTo(offset_start_pt)
-        swapped_order_cost = prev_raw.DistanceTo(raw_end_pt) + prev_offset.DistanceTo(offset_end_pt)
-        if swapped_order_cost < same_order_cost:
-            raw_start_pt, raw_end_pt = raw_end_pt, raw_start_pt
-            offset_start_pt, offset_end_pt = offset_end_pt, offset_start_pt
-
-        _append_unique_points(raw_points, [raw_start_pt, raw_end_pt])
-        _append_unique_points(offset_points, [offset_start_pt, offset_end_pt])
-        prev_raw = raw_end_pt
-        prev_offset = offset_end_pt
-
-    _append_unique_points(raw_points, [raw_end])
-    _append_unique_points(offset_points, [offset_end])
-    return raw_points, offset_points
-
-
-def _sample_curve_chain(points, reverse=False):
-    return list(reversed(points)) if reverse else list(points)
-
-
-def _build_output_sequence(front_points, back_points, truss_points):
-    """Assemble the final row as CD, DA, AC, CB."""
-    a_point = front_points[0]
-    b_point = front_points[-1]
-    back_chain = _sample_curve_chain(back_points, reverse=True)  # C -> D
-    output_points = []
-    _append_unique_points(output_points, back_chain)
-    _append_unique_points(output_points, [a_point])
-    _append_unique_points(output_points, truss_points)
-    _append_unique_points(output_points, [b_point])
-    return output_points
-
-
-def _build_offset_station_data(base_curve, back_curve, station_params, nozzle_value):
-    """Sample front/back rails and build explicit inward/outward offset points."""
+    Each station stores:
+        - the raw front/back points on the two rails
+        - the raw tangents used to center contact segments
+        - the inward copies of both rail points, always moved by exactly one
+          nozzle unless the rail gap is too small
+    """
     station_data = []
     for station_index, t_norm in enumerate(station_params):
         front_point, front_param = _curve_point_at_normalized(base_curve, t_norm)
         back_point, back_param = _curve_point_at_normalized(back_curve, t_norm)
         front_tangent = base_curve.TangentAt(front_param)
         back_tangent = back_curve.TangentAt(back_param)
-
         gap = front_point.DistanceTo(back_point)
         inward_dist = min(float(nozzle_value), max(0.0, gap * 0.5 - POINT_TOL))
-        front_offset = _move_point_toward(front_point, back_point, inward_dist)
-        back_truss_offset = _move_point_toward(back_point, front_point, inward_dist)
-        back_curve_offset = _move_point_toward(back_point, front_point, min(inward_dist * 2.0, max(0.0, gap - POINT_TOL)))
-        front_outward = _move_point_away(front_point, back_point, inward_dist)
-        back_outward = _move_point_away(back_point, front_point, inward_dist)
-
         station_data.append({
             "index": station_index,
             "t_norm": t_norm,
             "front_point": front_point,
             "back_point": back_point,
-            "front_offset": front_offset,
-            "back_truss_offset": back_truss_offset,
-            "back_curve_offset": back_curve_offset,
-            "front_outward": front_outward,
-            "back_outward": back_outward,
+            "front_offset": _move_point_toward(front_point, back_point, inward_dist),
+            "back_offset": _move_point_toward(back_point, front_point, inward_dist),
+            "back_outer": _move_point_away(back_point, front_point, nozzle_value),
             "front_tangent": front_tangent,
             "back_tangent": back_tangent,
         })
     return station_data
 
 
-def _build_contact_segments(station_data, contact_length_value, nozzle_value, use_offset):
-    """Create alternating truss segments from either raw or inward-offset station data."""
+def _build_base_contact_segments(station_data, contact_length_value, nozzle_value):
+    """Create the base alternating contact lines on the raw front/back rails."""
     contact_segments = []
     for station in station_data:
         station_index = station["index"]
         side = "front" if station_index % 2 == 0 else "back"
         segment_length = float(nozzle_value) if station_index == 0 or station_index == len(station_data) - 1 else float(contact_length_value)
-        point_key = "front_offset" if use_offset else "front_point"
-        back_key = "back_truss_offset" if use_offset else "back_point"
-        point = station[point_key] if side == "front" else station[back_key]
+        point = station["front_point"] if side == "front" else station["back_point"]
         tangent = station["front_tangent"] if side == "front" else station["back_tangent"]
         segment = _build_contact_segment(point, tangent, segment_length, side, station_index)
         contact_segments.append(segment)
     return contact_segments
 
 
-def _build_connector_offsets(station_data):
+def _build_offset_contact_segments(base_segments, station_data, nozzle_value):
+    """Offset each contact line inward toward the opposite rail by one nozzle."""
+    offset_segments = []
+    station_lookup = {station["index"]: station for station in station_data}
+    for segment in base_segments:
+        station = station_lookup[segment["station_index"]]
+        target_point = station["back_point"] if segment["side"] == "front" else station["front_point"]
+        offset_segments.append(_offset_segment_toward(segment, target_point, nozzle_value))
+    return offset_segments
+
+
+def _build_truss_path_points(base_segments, offset_segments, start_point, end_point, use_complement=False):
+    """Build one open truss-side path from the paired contact-line lists.
+
+    Forward pass:
+        0e 1i 2e 3i ...
+
+    Complementary paired side:
+        0i 1e 2i 3e ...
+
+    The full closed sequence is created later by reversing the complementary
+    path, which yields:
+        ... 5e 4i 3e 2i 1e 0i
+    """
+    if not base_segments or not offset_segments:
+        return []
+
+    path_points = [start_point]
+    for index in range(len(base_segments)):
+        base_segment = base_segments[index]
+        offset_segment = offset_segments[index]
+        if use_complement:
+            segment = offset_segment if index % 2 == 0 else base_segment
+        else:
+            segment = base_segment if index % 2 == 0 else offset_segment
+        segment_points = [segment["start"], segment["end"]]
+        _append_unique_points(path_points, segment_points)
+    _append_unique_points(path_points, [end_point])
+    return path_points
+
+
+def _build_connector_pairs(station_data, nozzle_value):
+    """Build the DA and CB segment pairs.
+
+    Raw connectors use the exact rail endpoints.
+    Offset connectors are shifted outward, normal to the connector segments.
+    """
     first_station = station_data[0]
     last_station = station_data[-1]
     da_raw = [first_station["back_point"], first_station["front_point"]]
     cb_raw = [last_station["back_point"], last_station["front_point"]]
-    da_offset = [first_station["back_outward"], first_station["front_outward"]]
-    cb_offset = [last_station["back_outward"], last_station["front_outward"]]
+    da_hint = Rhino.Geometry.Vector3d(first_station["front_tangent"]) * -1.0
+    cb_hint = Rhino.Geometry.Vector3d(last_station["front_tangent"])
+    da_start, da_end = _offset_connector_segment(da_raw[0], da_raw[1], da_hint, nozzle_value)
+    cb_start, cb_end = _offset_connector_segment(cb_raw[0], cb_raw[1], cb_hint, nozzle_value)
+    da_offset = [da_start, da_end]
+    cb_offset = [cb_start, cb_end]
     return da_raw, cb_raw, da_offset, cb_offset
 
 
 def _build_closed_loop(primary_points, secondary_points):
-    """Build one closed loop from a raw path and its offset counterpart."""
+    """Build one closed loop from a raw path and its inward parallel path."""
+    if not primary_points or not secondary_points:
+        return []
     loop_points = []
     _append_unique_points(loop_points, primary_points)
     _append_unique_points(loop_points, list(reversed(secondary_points)))
@@ -356,33 +389,27 @@ def _build_closed_loop(primary_points, secondary_points):
     return loop_points
 
 
-def _build_segment_polylines(primary_points, secondary_points):
-    """Return one closed polyline strip for each matched primary/offset segment."""
-    if len(primary_points) < 2 or len(secondary_points) < 2:
-        return []
-
-    segment_polylines = []
-    segment_count = min(len(primary_points), len(secondary_points)) - 1
-    for index in range(segment_count):
-        polyline = Rhino.Geometry.Polyline([
-            primary_points[index],
-            primary_points[index + 1],
-            secondary_points[index + 1],
-            secondary_points[index],
-            primary_points[index],
-        ])
-        segment_polylines.append(Rhino.Geometry.PolylineCurve(polyline))
-    return segment_polylines
+def _build_segment_curves(points):
+    """Convert a point chain into individual line-curve segments."""
+    segment_curves = []
+    for index in range(len(points) - 1):
+        start_pt = points[index]
+        end_pt = points[index + 1]
+        if start_pt.DistanceTo(end_pt) <= POINT_TOL:
+            continue
+        segment_curves.append(Rhino.Geometry.LineCurve(start_pt, end_pt))
+    return segment_curves
 
 
 def build_contactlines(base_curve, target_dist_value, truss_width_value, contact_length_value, nozzle_value):
-    """Build an offset truss row with explicit sequencing and debug geometry.
+    """Build the wall loop from truss pairs plus CD, DA and CB.
 
-    Sequence:
-        1. Sample front/back rails at shared stations.
-        2. Offset both rails inward by one nozzle.
-        3. Build alternating truss segments on the offset rails.
-        4. Assemble the final print row as CD, DA, AC, CB.
+    Steps:
+        1. Build the raw alternating truss contact lines.
+        2. Build their inward copies, one nozzle away.
+        3. Sequence the truss as alternating outer and inner segments.
+        4. Add the remaining CD, DA and CB path segments with the same raw/offset rule.
+        5. Build one closed loop from the raw path and the reversed offset path.
     """
     if base_curve is None or not base_curve.IsValid or base_curve.IsClosed:
         return [], [], None
@@ -400,50 +427,55 @@ def build_contactlines(base_curve, target_dist_value, truss_width_value, contact
         return [], [], None
 
     station_params = _build_station_params(curve_length, target_dist_value)
-    station_data = _build_offset_station_data(
+    station_data = _build_station_data(
         base_curve,
         back_curve,
         station_params,
         nozzle_value,
     )
-    raw_contact_segments = _build_contact_segments(
+    base_contact_segments = _build_base_contact_segments(
         station_data,
         contact_length_value,
         nozzle_value,
-        use_offset=False,
     )
-    offset_contact_segments = _build_contact_segments(
+    offset_contact_segments = _build_offset_contact_segments(
+        base_contact_segments,
         station_data,
-        contact_length_value,
         nozzle_value,
-        use_offset=True,
     )
 
-    front_raw_points = [station["front_point"] for station in station_data]
-    back_raw_points = [station["back_point"] for station in station_data]
-    front_offset_points = [station["front_offset"] for station in station_data]
-    back_offset_points = [station["back_curve_offset"] for station in station_data]
-    raw_truss_points, offset_truss_points = _build_parallel_truss_sequences(
-        raw_contact_segments,
+    raw_truss_points = _build_truss_path_points(
+        base_contact_segments,
         offset_contact_segments,
-        front_raw_points[0],
-        back_raw_points[-1],
-        front_offset_points[0],
-        back_offset_points[-1],
+        station_data[0]["front_point"],
+        station_data[-1]["back_point"],
+        use_complement=False,
     )
-    da_raw, cb_raw, da_offset, cb_offset = _build_connector_offsets(station_data)
-    raw_output_points = _sample_curve_chain(back_raw_points, reverse=True)
+    offset_truss_points = _build_truss_path_points(
+        base_contact_segments,
+        offset_contact_segments,
+        station_data[0]["front_offset"],
+        station_data[-1]["back_offset"],
+        use_complement=True,
+    )
+
+    back_raw_points = list(reversed([station["back_point"] for station in station_data]))
+    back_offset_points = list(reversed([station["back_outer"] for station in station_data]))
+    da_raw, cb_raw, da_offset, cb_offset = _build_connector_pairs(station_data, nozzle_value)
+
+    raw_output_points = list(back_raw_points)
     _append_unique_points(raw_output_points, da_raw[1:])
-    _append_unique_points(raw_output_points, raw_truss_points)
+    _append_unique_points(raw_output_points, raw_truss_points[1:])
     _append_unique_points(raw_output_points, cb_raw[1:])
-    offset_output_points = _sample_curve_chain(back_offset_points, reverse=True)
+
+    offset_output_points = list(back_offset_points)
     _append_unique_points(offset_output_points, da_offset[1:])
-    _append_unique_points(offset_output_points, offset_truss_points)
+    _append_unique_points(offset_output_points, offset_truss_points[1:])
     _append_unique_points(offset_output_points, cb_offset[1:])
 
     closed_loop_points = _build_closed_loop(raw_output_points, offset_output_points)
-    segment_polylines = _build_segment_polylines(raw_output_points, offset_output_points)
-    return closed_loop_points, segment_polylines, back_curve
+    segment_curves = _build_segment_curves(closed_loop_points)
+    return closed_loop_points, segment_curves, back_curve
 
 
 def build_truss_layers(base_surface, layer_height_value, layer_limit, target_dist_value, truss_width_value, contact_length_value, nozzle_value):
@@ -470,6 +502,17 @@ def build_truss_layers(base_surface, layer_height_value, layer_limit, target_dis
         debug_rows.append(segment_polylines)
 
     return layer_rows, debug_rows
+
+# Layer sequencing
+# FIXME: Review this sequence to guide the code output
+
+# front_crv >> Start_pt == A , End_pt == B
+# back_crv >> Start_pt == D , End_pt == C
+# Truss is the middle section
+# Truss divisions are always uneven
+# Truss always starts at A and ends in C
+# output sequence: back_crv (CD) , DA, truss (AC), CB
+
 
 
 a = th.list_to_tree([])

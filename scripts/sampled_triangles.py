@@ -15,7 +15,7 @@ Approach:
     1. Build a stacked scaffold of divided copies of `base_crv`.
     2. Reuse the original U/V seed logic to decide candidate opening points.
     3. Sample the guide surface at each candidate point.
-    4. Convert guide values into opening gate / width / propagation steps.
+    4. Convert guide values into opening width / depth / density parameters.
     5. Propagate tapered widths upward and emit the same four-point triangle
        opening profile used by the original porous triangle script.
 
@@ -35,8 +35,8 @@ Inputs:
 
 Optional GH inputs:
     param_config: Dict configuring surface-driven parameters.
-    gate_threshold: Seed opens when sampled gate value >= threshold.
-    density: Normalized 0..1 control for overall appearance density.
+    gate_threshold: Legacy threshold input kept for backward compatibility.
+    density: Normalized 0..1 global multiplier for appearance density.
     u_shift, v_shift, u_scale, v_scale, v_reverse, opening_scale:
         Same modulation inputs as the existing triangular script.
 
@@ -84,6 +84,19 @@ def _is_number(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+def _normalize_param_mode(mode):
+    """Map public param_config aliases to the internal evaluator modes."""
+    image_aliases = {
+        "image.r": "image_r",
+        "image.g": "image_g",
+        "image.b": "image_b",
+        "image.red": "image_r",
+        "image.green": "image_g",
+        "image.blue": "image_b",
+    }
+    return image_aliases.get(mode, mode)
+
+
 def _coerce_required(name, value, expected_type, coercer=None):
     """Validate a required Grasshopper input using local helpers where possible."""
     try:
@@ -128,6 +141,7 @@ def _validate_param_spec(name, spec, errors):
         _append_error(errors, "param_config['{}'] must be a (mode, settings) pair.".format(name))
         return None
     mode, settings = spec
+    mode = _normalize_param_mode(mode)
     if mode == "fixed":
         if not _is_number(settings):
             _append_error(errors, "param_config['{}'] fixed mode requires a number.".format(name))
@@ -216,6 +230,7 @@ def _validate_param_spec(name, spec, errors):
         if not isinstance(sources, (list, tuple)) or len(sources) < 2:
             _append_error(errors, "param_config['{}'] composite mode requires at least two sources.".format(name))
             return None
+        normalized_sources = []
         for idx, source in enumerate(sources):
             if not isinstance(source, (list, tuple)) or len(source) != 2:
                 _append_error(
@@ -223,29 +238,37 @@ def _validate_param_spec(name, spec, errors):
                     "param_config['{}'] composite source {} must be a (mode, settings) pair.".format(name, idx),
                 )
                 return None
-            if _validate_param_spec("{} source {}".format(name, idx), source, errors) is None:
+            normalized_source = _validate_param_spec("{} source {}".format(name, idx), source, errors)
+            if normalized_source is None:
                 return None
+            normalized_sources.append(normalized_source)
         if "scale" in settings and not _is_number(settings["scale"]):
             _append_error(errors, "param_config['{}'] composite 'scale' must be numeric.".format(name))
             return None
+        settings = dict(settings)
+        settings["sources"] = normalized_sources
     else:
         _append_error(errors, "Unsupported parameter mode: {}".format(mode))
         return None
-    return spec
+    return (mode, settings)
 
 
-def _validate_param_config(param_config, img, errors):
+def _validate_param_config(param_config, img, errors, default_steps):
     """Validate the optional param_config dictionary."""
     if not isinstance(param_config, dict):
         _append_error(errors, "param_config must be a dictionary when provided.")
         return None
 
     validated = {}
-    for key in ("gate", "width", "steps"):
+    for key in ("width", "depth"):
         if key not in param_config:
             _append_error(errors, "param_config is missing '{}'.".format(key))
             continue
         validated[key] = _validate_param_spec(key, param_config[key], errors)
+    if "steps" in param_config:
+        validated["steps"] = _validate_param_spec("steps", param_config["steps"], errors)
+    else:
+        validated["steps"] = ("fixed", float(default_steps if default_steps is not None else 1.0))
     if "density" in param_config:
         validated["density"] = _validate_param_spec("density", param_config["density"], errors)
     else:
@@ -316,64 +339,9 @@ def _validate_inputs():
     if seed_row_start_value is not None:
         seed_row_start_value = int(seed_row_start_value)
 
-    user_defined_param_config = "param_config" in globals()
-    width_gradient_presets = {
-        "custom_v_width": (
-            "gradient_stops",
-            {
-                "axis": "v",
-                "stops": [(0.0, 80.0), (0.2, 50.0), (0.7, 100.0), (1.0, 200.0)],
-            },
-        ),
-    }
-    default_param_config = {
-        "gate": ("fixed", 1.0),
-        "width": (
-            "gradient_stops",
-            {
-                "axis": "v",
-                "stops": [(0.0, 80.0), (0.2, 50.0), (0.7, 100.0), (1.0, 200.0)],
-            },
-        ),
-        "steps": (
-            "gradient_stops",
-            {
-                "axis": "v",
-                "stops": [(0.0, 3.0), (0.2, 2.0), (0.7, 12.0), (1.0, 25.0)],
-            },
-        ),
-        "density": (
-            "composite",
-            {
-                "operation": "multiply",
-                "sources": [
-                    (
-                        "gradient_stops",
-                        {
-                            "axis": "v",
-                            "stops": [
-                                (0.0, 0.8),
-                                (0.2, 0.6),
-                                (0.25, 0.1),
-                                (0.7, 0.3),
-                                (0.75, 1.0),
-                                (1.0, 0.8),
-                            ],
-                        },
-                    ),
-                    (
-                        "gradient_stops",
-                        {
-                            "axis": "u",
-                            "stops": [(0.2, 0.3), (0.5, 1), (0.8, 0.3)],
-                        },
-                    ),
-                ],
-            },
-        ),
-    }
-    param_config_value = _get_param("param_config", default_param_config)
-    param_config_value = _validate_param_config(param_config_value, img_value, errors)
+    param_config_value = _get_param("param_config", None)
+    if param_config_value is not None:
+        param_config_value = _validate_param_config(param_config_value, img_value, errors, steps_value)
 
     if (
         opening_width_value is not None
@@ -415,7 +383,6 @@ def _validate_inputs():
         "density": density_value,
         "random_seed": int(random_seed_value) if random_seed_value is not None else 1,
         "param_config": param_config_value,
-        "width_gradient_presets": width_gradient_presets,
     }
 
 
@@ -465,6 +432,8 @@ def _sample_guide_data(pt, guide_srf, img):
 
 def evaluate_parameter(mode, settings, pt, uv, rgb):
     """Evaluate one scalar parameter from fixed, image, or gradient sources."""
+    mode = _normalize_param_mode(mode)
+
     if mode == "fixed":
         return float(settings)
 
@@ -537,16 +506,19 @@ def evaluate_parameter(mode, settings, pt, uv, rgb):
     raise ValueError("Unsupported parameter mode: {}".format(mode))
 
 
-def add_wall_opening(pt, base_crv, width, angle, disp):
+def add_wall_opening(pt, base_crv, width, angle, disp, disp_width=None):
     """Create the four-point triangular opening profile from the original script."""
     pt_param = rs.CurveClosestPoint(base_crv, pt)
     tangent = rs.VectorUnitize(rs.CurveTangent(base_crv, pt_param))
     normal = rs.VectorRotate(tangent, 90 - angle, [0, 0, 1])
+    inner_width = width if disp_width is None else max(float(disp_width), float(width))
     pt_before = rs.PointAdd(pt, rs.VectorScale(tangent, -width / 2.0))
     pt_after = rs.PointAdd(pt, rs.VectorScale(tangent, width / 2.0))
+    pt_before_inner = rs.PointAdd(pt, rs.VectorScale(tangent, -inner_width / 2.0))
+    pt_after_inner = rs.PointAdd(pt, rs.VectorScale(tangent, inner_width / 2.0))
     disp_vec = rs.VectorScale(normal, disp)
-    pt_before_disp = rs.PointAdd(pt_before, disp_vec)
-    pt_after_disp = rs.PointAdd(pt_after, disp_vec)
+    pt_before_disp = rs.PointAdd(pt_before_inner, disp_vec)
+    pt_after_disp = rs.PointAdd(pt_after_inner, disp_vec)
     return (pt_before, pt_before_disp, pt_after_disp, pt_after)
 
 
@@ -646,7 +618,6 @@ def build_random_seed_data(
     guide_srf,
     img,
     param_config,
-    gate_threshold,
     density,
     div_dist,
     random_seed,
@@ -676,16 +647,6 @@ def build_random_seed_data(
             pt = rs.EvaluateCurve(curve, curve_param)
             uv, rgb = _sample_guide_data(pt, guide_srf, img)
 
-            gate_value = evaluate_parameter(
-                param_config["gate"][0],
-                param_config["gate"][1],
-                pt,
-                uv,
-                rgb,
-            )
-            if gate_value < gate_threshold:
-                continue
-
             width_value = max(
                 0.0,
                 float(
@@ -700,6 +661,18 @@ def build_random_seed_data(
             )
             if not _has_edge_clearance(curve, curve_param, width_value):
                 continue
+            depth_value = max(
+                0.0,
+                float(
+                    evaluate_parameter(
+                        param_config["depth"][0],
+                        param_config["depth"][1],
+                        pt,
+                        uv,
+                        rgb,
+                    )
+                ),
+            )
             step_value = max(
                 1,
                 int(
@@ -749,6 +722,7 @@ def build_random_seed_data(
                     "param": curve_param,
                     "arc": t_norm * curve_length,
                     "width": width_value,
+                    "depth": depth_value,
                     "steps": step_value,
                     "local_density": local_density,
                     "min_u_spacing": min_u_spacing,
@@ -786,9 +760,9 @@ def build_random_seed_data(
     return seeds
 
 
-def build_opening_widths(curve_stack, point_stack, seed_stack, guide_srf, img, param_config, gate_threshold):
+def build_opening_widths(curve_stack, point_stack, seed_stack, guide_srf, img, param_config):
     """Sample the guide surface at seed points and propagate opening widths upward."""
-    openings = [[0.0 for _ in row] for row in seed_stack]
+    openings = [[(0.0, 0.0) for _ in row] for row in seed_stack]
 
     for v, row in enumerate(point_stack):
         curve = curve_stack[v]
@@ -798,18 +772,8 @@ def build_opening_widths(curve_stack, point_stack, seed_stack, guide_srf, img, p
 
             if guide_srf is None:
                 uv, rgb = (0.0, 0.0), None
-                gate_value = 1.0
             else:
                 uv, rgb = _sample_guide_data(pt, guide_srf, img)
-                gate_value = evaluate_parameter(
-                    param_config["gate"][0],
-                    param_config["gate"][1],
-                    pt,
-                    uv,
-                    rgb,
-                )
-                if gate_value < gate_threshold:
-                    continue
 
             width = evaluate_parameter(
                 param_config["width"][0],
@@ -843,7 +807,11 @@ def build_opening_widths(curve_stack, point_stack, seed_stack, guide_srf, img, p
                     break
                 taper_t = float(n) / float(local_steps)
                 propagated = gl.lerp(width, 0.0, taper_t)
-                openings[row_idx][u] = max(openings[row_idx][u], propagated)
+                existing_width, existing_disp_width = openings[row_idx][u]
+                openings[row_idx][u] = (
+                    max(existing_width, propagated),
+                    max(existing_disp_width, width),
+                )
 
     return openings
 
@@ -871,7 +839,7 @@ def build_opening_events(curve_stack, random_seeds):
             propagated = gl.lerp(seed["width"], 0.0, taper_t)
             if propagated <= 0.0:
                 continue
-            event_stack[row_idx].append((seed["param"], propagated))
+            event_stack[row_idx].append((seed["param"], propagated, seed["width"], seed["depth"]))
 
     return event_stack
 
@@ -889,7 +857,7 @@ def build_output_points(point_stack, curve_stack, openings, angle, displacement)
     for row_idx, row in enumerate(point_stack):
         row_pts = []
         for col_idx, pt in enumerate(row):
-            width = openings[row_idx][col_idx]
+            width, disp_width = openings[row_idx][col_idx]
             if width > 0.0:
                 row_pts.extend(
                     add_wall_opening(
@@ -898,6 +866,7 @@ def build_output_points(point_stack, curve_stack, openings, angle, displacement)
                         width,
                         angle,
                         disp_comp,
+                        disp_width,
                     )
                 )
             else:
@@ -910,15 +879,14 @@ def build_output_points(point_stack, curve_stack, openings, angle, displacement)
 def build_output_points_from_events(point_stack, curve_stack, event_stack, angle, displacement):
     """Emit output rows by merging base contour points with opening events."""
     output = []
-    disp_comp = displacement / math.cos(math.radians(angle))
 
     for row_idx, row in enumerate(point_stack):
         curve = curve_stack[row_idx]
         domain = rs.CurveDomain(curve)
         row_items = [(domain[0], 0, row[0])]
-        for event_param, width in event_stack[row_idx]:
+        for event_param, width, disp_width, depth in event_stack[row_idx]:
             event_pt = rs.EvaluateCurve(curve, event_param)
-            row_items.append((event_param, 1, (event_pt, width)))
+            row_items.append((event_param, 1, (event_pt, width, disp_width, depth)))
 
         row_items.append((domain[1], 0, row[-1]))
         row_items.sort(key=lambda item: (item[0], item[1]))
@@ -928,7 +896,8 @@ def build_output_points_from_events(point_stack, curve_stack, event_stack, angle
             if item_type == 0:
                 row_pts.append(payload)
             else:
-                event_pt, width = payload
+                event_pt, width, disp_width, depth = payload
+                disp_comp = depth / math.cos(math.radians(angle))
                 row_pts.extend(
                     add_wall_opening(
                         event_pt,
@@ -936,6 +905,7 @@ def build_output_points_from_events(point_stack, curve_stack, event_stack, angle
                         width,
                         angle,
                         disp_comp,
+                        disp_width,
                     )
                 )
         output.append(row_pts)
@@ -958,7 +928,7 @@ def build_closed_output(base_crv, output, layers, layer_height, displacement):
 
 
 def build_gradient_preview(guide_srf, img, param_config, opening_width, opening_scale, sample_count=24):
-    """Build a grayscale mesh preview of the active width field on guide_srf."""
+    """Build a preview mesh for the active guide field on guide_srf."""
     if guide_srf is None:
         return None
 
@@ -981,16 +951,20 @@ def build_gradient_preview(guide_srf, img, param_config, opening_width, opening_
             uv = (u_t, v_t)
             rgb = sample_surface_color(pt, guide_srf, img) if img else None
 
-            if width_mode == "fixed":
-                width_value = float(width_settings)
+            if rgb is not None:
+                mesh_color = Color.FromArgb(int(rgb[0]), int(rgb[1]), int(rgb[2]))
             else:
-                width_value = evaluate_parameter(width_mode, width_settings, pt, uv, rgb)
+                if width_mode == "fixed":
+                    width_value = float(width_settings)
+                else:
+                    width_value = evaluate_parameter(width_mode, width_settings, pt, uv, rgb)
 
-            factor = gl.minmaxcap(0.2, 1.0, float(width_value) / base_width)
-            gray = int(round(gl.remap(0.2, 1.0, 51, 255, factor)))
+                factor = gl.minmaxcap(0.2, 1.0, float(width_value) / base_width)
+                gray = int(round(gl.remap(0.2, 1.0, 51, 255, factor)))
+                mesh_color = Color.FromArgb(gray, gray, gray)
 
             mesh.Vertices.Add(rs.coerce3dpoint(pt))
-            mesh.VertexColors.Add(Color.FromArgb(gray, gray, gray))
+            mesh.VertexColors.Add(mesh_color)
 
     row_size = sample_count + 1
     for v_idx in range(sample_count):
@@ -1006,6 +980,35 @@ def build_gradient_preview(guide_srf, img, param_config, opening_width, opening_
     return mesh
 
 
+# param_config = {
+#     "width": ("image.r", (30, 80)),
+#     "steps": ("image.g", (3, 6)),
+#     "density": ("image.b", (0.2, 1.0)),
+#     "depth": ("fixed", 100),
+# }
+
+# param_config = {
+#     "width": ("image.r", (10.0, 45.0)),
+#     "depth": ("image.g", (12.0, 60.0)),
+#     "density": ("image.b", (0.05, 1.0)),
+#     "steps": ("fixed", 6.0),
+# }
+
+# param_config = {
+#     "width": ("image.r", (20.0, 90.0)),
+#     "depth": ("image.g", (30.0, 120.0)),
+#     "density": ("image.b", (0.15, 0.85)),
+#     "steps": ("fixed", 8.0),
+# }
+
+# param_config = {
+#     "width": ("image.r", (15.0, 55.0)),
+#     "depth": ("fixed", 80.0),
+#     "density": ("image.b", (0.3, 1.0)),
+#     "steps": ("image.g", (2.0, 7.0)),
+# }
+
+
 validated = _validate_inputs()
 
 if validated is None:
@@ -1014,67 +1017,13 @@ if validated is None:
     c = []
     C = c
 else:
-    # Example image-driven setup:
-    # param_config = {
-    #     "gate": ("image_r", (0.0, 1.0)),
-    #     "width": ("image_g", (10.0, 45.0)),
-    #     "steps": ("image_b", (2.0, 8.0)),
-    # }
-    #
-    # Example stop-based procedural setup:
-    # param_config = {
-    #     "gate": ("fixed", 1.0),
-    #     "density": (
-    #         "composite",
-    #         {
-    #             "operation": "multiply",
-    #             "sources": [
-    #                 (
-    #                     "gradient_stops",
-    #                     {
-    #                         "axis": "v",
-    #                         "stops": [
-    #                             (0.0, 0.8),
-    #                             (0.2, 0.6),
-    #                             (0.25, 0.1),
-    #                             (0.7, 0.3),
-    #                             (0.75, 1.0),
-    #                             (1.0, 0.8),
-    #                         ],
-    #                     },
-    #                 ),
-    #                 (
-    #                     "gradient_stops",
-    #                     {
-    #                         "axis": "u",
-    #                         "stops": [(0.2, 0.3), (0.5, 0.8), (0.8, 0.3)],
-    #                     },
-    #                 ),
-    #             ],
-    #         },
-    #     ),
-    #     "width": (
-    #         "gradient_stops",
-    #         {
-    #             "axis": "v",
-    #             "stops": [(0.0, 80.0), (0.2, 50.0), (0.7, 100.0), (1.0, 200.0)],
-    #         },
-    #     ),
-    #     "steps": (
-    #         "gradient_stops",
-    #         {
-    #             "axis": "v",
-    #             "stops": [(0.0, 3.0), (0.2, 2.0), (0.7, 12.0), (1.0, 25.0)],
-    #         },
-    #     ),
-    # }
     point_stack, curve_stack = build_curve_stack(
         validated["base_crv"],
         validated["layers"],
         validated["layer_height"],
         validated["div_dist"],
     )
-    if validated["guide_srf"] is None:
+    if validated["guide_srf"] is None or validated["param_config"] is None:
         seed_stack = build_regular_seed_stack(
             point_stack,
             validated["num_u"],
@@ -1093,12 +1042,11 @@ else:
             None,
             validated["img"],
             {
-                "gate": ("fixed", 1.0),
                 "width": ("fixed", validated["opening_width"] * validated["opening_scale"]),
                 "steps": ("fixed", validated["steps"]),
                 "density": ("fixed", 1.0),
+                "depth": ("fixed", validated["displacement"]),
             },
-            0.0,
         )
         output = build_output_points(
             point_stack,
@@ -1114,7 +1062,6 @@ else:
             validated["guide_srf"],
             validated["img"],
             validated["param_config"],
-            validated["gate_threshold"],
             validated["density"],
             validated["div_dist"],
             validated["random_seed"],
@@ -1135,12 +1082,16 @@ else:
         validated["layer_height"],
         validated["displacement"],
     )
-    b = build_gradient_preview(
-        validated["guide_srf"] if validated["guide_srf"] is not None else None,
-        validated["img"],
-        validated["param_config"],
-        validated["opening_width"],
-        validated["opening_scale"],
+    b = (
+        build_gradient_preview(
+            validated["guide_srf"],
+            validated["img"],
+            validated["param_config"],
+            validated["opening_width"],
+            validated["opening_scale"],
+        )
+        if validated["guide_srf"] is not None and validated["param_config"] is not None
+        else []
     )
 
     a = th.list_to_tree(closed_output)

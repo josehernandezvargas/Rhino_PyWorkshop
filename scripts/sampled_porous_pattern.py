@@ -74,6 +74,14 @@ def get_div_pts_and_params(crv, srf, img, dist_range, amp_range, shift_range):
         div_data.append((pt, amp, shift))
         t += dist
 
+    if div_data:
+        end_pt = rs.EvaluateCurve(crv, t_max)
+        if div_data[-1][0] != end_pt:
+            rgb = sample_surface_color(end_pt, srf, img)
+            _, amp, shift = rgb_to_parameters(
+                rgb, dist_range, amp_range, shift_range)
+            div_data.append((end_pt, amp, shift))
+
     return div_data
 
 
@@ -104,17 +112,19 @@ def build_alternating_polylines(crv, div_data):
         A2.append(rs.PointAdd(A_base, rs.VectorScale(tan, -shift * sign)))
         B2.append(rs.PointAdd(B_base, rs.VectorScale(tan, shift * sign)))
 
-    poly1, poly2 = [], []
-    for i in range(len(div_data) - 1):
+    if not div_data:
+        return [], []
+
+    poly1 = [A1[0]]
+    poly2 = [A2[0]]
+
+    for i in range(len(div_data)):
         if i % 2 == 0:
             poly1.extend([A1[i], B1[i]])
             poly2.extend([B2[i], A2[i]])
         else:
             poly1.extend([B1[i], A1[i]])
             poly2.extend([A2[i], B2[i]])
-    if div_data:
-        poly1.append(B1[-1])
-        poly2.append(A2[-1])
 
     return poly1, poly2
 
@@ -135,7 +145,7 @@ def generate_pattern_stack(crvs, srf, img, pattern, dist_range, amp_range, shift
             crv, srf, img, dist_range, amp_range, shift_range)
         poly1, poly2 = build_alternating_polylines(crv, div_data)
         tag = next(pattern_gen)
-        polyline = rs.AddPolyline(poly1 if tag else poly2)
+        polyline = rs.AddPolyline(poly1 if not tag else poly2)
         if polyline:
             stacked.append(polyline)
 
@@ -174,9 +184,9 @@ def sample_coloured_parameters_from_image(crvs, srf, img, dist_range, amp_range,
 #         dist_range (tuple), amp_range (tuple), shift_range (tuple)
 # Output: a (list of polylines)
 
-dist_range = (40, 100)
-amp_range = (80, 20)
-shift_range = (-20, 20)
+dist_range = (50, 80)
+amp_range = (50, 50)
+shift_range = (-20, 10)
 
 a = generate_pattern_stack(crvs, srf, img, pattern,
                            dist_range, amp_range, shift_range)

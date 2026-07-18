@@ -1,5 +1,7 @@
 import math
+import Rhino
 import rhinoscriptsyntax as rs
+import iolib as io
 
 
 def lerp(a, b, t):
@@ -7,6 +9,18 @@ def lerp(a, b, t):
     Creates a linear interpolation between two values
     Returns the value for a parameter t in the range a - b"""
     return((1 - t) * a + b * t)
+
+def lerp_bias(a, b, t, factor=1.0, min_factor=0.1, max_factor=2.0):
+    """
+    Interpolates between a and b with a bias factor.
+    factor = 1.0 gives linear interpolation.
+    factor > 1.0 bends upward (toward b).
+    factor < 1.0 bends downward (toward a).
+    """
+    f = min(max(factor, min_factor), max_factor)
+    t = min(1.0, max(0.0, t))
+    t_biased = t ** (1.0 / f)
+    return lerp(a, b, t_biased)
 
 
 def invlerp(a, b, v):
@@ -34,18 +48,32 @@ def lerppts( a , b , t):
     return (rs.AddPoint(x,y,z))
 
 def minmaxcaplist(lo, hi, t):
-    """Clamps a value between two limits"""
+    """Clamps a list between two limits"""
     results = []
     for item in t:
-        newitem = min(hi, max(lo, t))
+        newitem = min(hi, max(lo, item))
         results.append(newitem)
     return(results)
 
 
 def minmaxcap(lo, hi, t):
-    """Clamps a list between to limits"""
+    """Clamps a value between two limits"""
     newitem = min(hi, max(lo, t))
     return(newitem)
+
+
+def bbox_bounds(geometry):
+    """
+    Computes the axis-aligned bounding box extent of the input geometry.
+
+    Returns
+        (minx, miny, minz, maxx, maxy, maxz), or None if the bounding box
+        could not be computed.
+    """
+    bbox = rs.BoundingBox(geometry)
+    if not bbox:
+        return None
+    return (bbox[0][0], bbox[0][1], bbox[0][2], bbox[6][0], bbox[6][1], bbox[6][2])
 
 
 def flattenlist(list):
@@ -166,3 +194,15 @@ def plane_to_abc(origin, x_vector, y_vector):
         yaw -= 360
 
     return yaw, pitch, roll
+
+
+
+def validate_input(name, value, expected_type, component, allow_none=False, coercer=None):
+    """Validate a Grasshopper component input's type, with optional coercion.
+
+    Thin wrapper around iolib.validate_type, kept for backward compatibility
+    with existing gl.validate_input(...) call sites.
+    """
+    return io.validate_type(
+        name, value, expected_type, component=component, allow_none=allow_none, coercer=coercer
+    )

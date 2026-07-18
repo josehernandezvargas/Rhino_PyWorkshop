@@ -12,9 +12,10 @@ import rhinoscriptsyntax as rs # type: ignore
 import Grasshopper as gh
 import os
 import time
-import math
 from itertools import chain
 import printlib as pl
+import gcodelib as gcl
+import geometrylib as gl
 from gcodelib import GCodeLib
 
 start_time = time.time()
@@ -29,6 +30,7 @@ polyline = rs.AddPolyline(PTS)
 
 gcode.get_part_dims(polyline)
 gcode.add_header(nozzle, flow)
+gcode.check_print(reporter=ghenv.Component)
 
 print("0 initialise class / add header: {:.4f} seconds".format(time.time() - start_time))
 
@@ -40,8 +42,8 @@ previewflow = []
 filament = 2.85
 zero = nozzle / 2
 
-timestamp = time.strftime("%Y%m%d")  # adds a timestamp with the date
-hourstamp = " at " + time.strftime("%X")  # a timestamp with the hour
+timestamp = gl.timestamp()  # adds a timestamp with the date
+hourstamp = " at " + gl.timestamp(format=3)  # a timestamp with the hour
 
 # get the radius from printer parameters
 delta_radius = gcode.machine['build_volume']['r']
@@ -66,7 +68,7 @@ PTS = rs.CurvePoints(toolpath)
 print("2 PTS to polyline and back: {:.4f} seconds".format(time.time() - start_time))
 
 
-materialflow = pl.caluclate_flow(nozzle, layerheight, filament) / 10 * flow
+materialflow = gcl.calculate_flow(nozzle, layerheight, filament) / 10 * flow
 # print(nozzle, layerheight, filament, materialflow)
 
 print("3 material flow calc: {:.4f} seconds".format(time.time() - start_time))
@@ -124,25 +126,21 @@ for i, pt in enumerate(PTS):
     if i == 0:
         # first point
         if first:  # first point in the first curve only
-            # gline = gcline(0, F0, pt)
-            gline = pl.gcodeline(0,pt,f=F1)
-            gcode.commands.append("G11") # unretract
+            gline = gcl.gcodeline(0, pt, f=F1)
+            gcode.commands.append(gcl.unretract())
             first = False
         else:  # first point of subsequent curves
-            # gline = gcline(1, F1, pt)
-            gline = pl.gcodeline(1, pt, f=F1)
+            gline = gcl.gcodeline(1, pt, f=F1)
         gcode.commands.append(gline)
     else:
-        # gline = gcline(1, F1, pt, ext)
-        gline = pl.gcodeline(0, pt, f=F1, e=ext)
+        gline = gcl.gcodeline(0, pt, f=F1, e=ext)
         gcode.commands.append(gline)
     # print(pt, gline)
-    # gcode.commands.append("G10") # retract
 
 print("5 main loop: {:.4f} seconds".format(time.time() - start_time))
 
 
-gcode.commands.append("G10")
+gcode.commands.append(gcl.retract())
 gcode.commands.append(";M82 ;absolute extrusion mode")
 gcode.commands.append("")
 gcode.commands.append(";End of Gcode")
@@ -164,23 +162,13 @@ secs = int(rs.CurveLength(preview) / F1 * 60)
 gcode.header.insert(1, f"; TIME: {secs//3600:02}:{(secs%3600)//60:02}:{secs%60:02}")
 
 
-file = os.path.dirname(os.path.realpath(ghdoc.Path))
-extension = ".gcode"
-
-file += '\\' + timestamp + "_" + filename + \
-    extension  # Set file name and extension
-
+base_dir = os.path.dirname(os.path.realpath(ghdoc.Path))
 
 print("6 end and compile gcode: {:.4f} seconds".format(time.time() - start_time))
 
 
 if save:
-    # gcode.save() FIXME: this function is not working
-    with open(file, "w") as filePath:  # Open the file
-        for line in gcode.header:  # Iterate through lines
-            filePath.write(line + "\n")  # Write separate lines
-        for line in gcode.commands:  # Iterate through lines
-            filePath.write(line + "\n")  # Write separate lines
+    file = gcode.save(base_dir)
 
     # print the filepath and a timestamp with the hour
     print('File Saved ' + file + hourstamp)

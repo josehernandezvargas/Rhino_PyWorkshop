@@ -1,121 +1,123 @@
 #! python3
 """
-Grasshopper G‑code exporter 
+Grasshopper G‑code exporter
 =============================
 
 Inputs
 ------
-* **crv** *(required)* : GUID, Curve, or list thereof.
-* **tol** *(optional float)* : max segment length for tessellation (default 0.05).
-* **filename** *(optional string)* : base name (no extension, default "export").
-* **z_offset** *(optional float)* : added to every Z coordinate (default 0.0).
-* **run** *(optional bool)* : regenerate outputs **a**, **b** when **True** (default True).
-* **save** *(optional bool)* : write file when **True** (default False).
+* **crv** *(required)* : GUID, Curve, or list thereof.
+* **tol** *(optional float)* : max segment length for tessellation (default 0.1).
+* **filename** *(optional string)* : base name (no extension, default "export").
+* **z_offset** *(optional float)* : added to every Z coordinate (default 0.0).
+* **run** *(optional bool)* : regenerate outputs **a**, **b** when **True** (default True).
+* **save** *(optional bool)* : write file when **True** (default False).
 
 Outputs
 -------
-* **a** : list of G‑code lines.
-* **b** : list matching **a**; `(x, y, z)` tuples for moves, `(0.0, 0.0, 0.0)` for `;Layer` lines.
+* **a** : list of G‑code lines.
+* **b** : list matching **a**; `Point3d` values for moves, `Point3d.Unset` for `;Layer` lines.
+* **preview** *(optional output)* : lightweight preview as a list of `Point3d` values centered near origin.
 
 Requirements
 ------------
 """
 
 import rhinoscriptsyntax as rs
-import printlib as pl
+import Rhino
 import geometrylib as gl
+import gcodelib as gcl
 import os
 
 
 # --- Defaults & coerce ---
-curves   = crv if isinstance(crv, list) else [crv]
-tol      = tol if 'tol' in globals() else 0.05
-name     = filename if 'filename' in globals() and filename else 'export'
-z_offset = z_offset if 'z_offset' in globals() else 0.0
-run_btn  = run if 'run' in globals() else True
-save_btn = save if 'save' in globals() else False
+curves = crv if isinstance(crv, list) else [crv]
+tol = tol if 'tol' in globals() and tol is not None else 0.1
+name = filename if 'filename' in globals() and filename else 'export'
+z_offset = z_offset if 'z_offset' in globals() and z_offset is not None else 0.0
+run_btn = run if 'run' in globals() and run is not None else True
+save_btn = save if 'save' in globals() and save is not None else False
+preview = []
+
+try:
+    tol = float(tol)
+except (TypeError, ValueError):
+    tol = 0.1
+tol = max(tol, 0.1)
 
 a = []  # gcode lines
-b = []  # point tuples or placeholder for comments
+b = []  # Rhino Point3d values or placeholder for comments
 
 # --- Helpers ---
-def purge_duplicates(pts, tol_dup=1e-6):
-    unique, last = [], None
-    for p in pts:
-        if last is None or rs.Distance(p, last) > tol_dup:
-            unique.append(p)
-            last = p
-    return unique
+def make_preview_points(point_groups):
+    return [pt for group in point_groups for pt in group]
 
-def purge_collinear(pts, tol_col=1e-6):
-    if len(pts) < 3:
-        return pts
-    cleaned = [pts[0]]
-    for i in range(1, len(pts)-1):
-        prev, curr, nxt = pts[i-1], pts[i], pts[i+1]
-        v1 = rs.VectorCreate(curr, prev)
-        v2 = rs.VectorCreate(nxt, curr)
-        if rs.VectorLength(rs.VectorCrossProduct(v1, v2)) > tol_col:
-            cleaned.append(curr)
-    cleaned.append(pts[-1])
-    return cleaned
+def get_output_dir():
+    try:
+        if ghdoc and ghdoc.Path:
+            return os.path.dirname(os.path.realpath(ghdoc.Path))
+    except NameError:
+        pass
+    return os.getcwd()
 
 # --- Main generation ---
 if run_btn:
-    all_pts = []
+    point_groups = []
     for c in curves:
         cid = rs.coercecurve(c)
         if not cid:
             print(f"Invalid input: {c}")
             continue
-        if rs.IsPolyline(cid):
-            pts = rs.PolylineVertices(cid)
-        else:
-            length = rs.CurveLength(cid)
-            segments = max(int(length / tol), 1)
-            pts = rs.DivideCurve(cid, segments)
-        pts = purge_duplicates(pts)
-        pts = purge_collinear(pts)
-        all_pts.extend(pts)
+        pts = gcl.curve_to_points(cid, tol)
+        if not pts:
+            continue
+        pts = gcl.purge_duplicate_points(pts)
+        pts = gcl.purge_collinear_points(pts)
+        if pts:
+            point_groups.append(pts)
+
+    point_groups = gcl.center_points_to_origin(point_groups)
+    preview = make_preview_points(point_groups)
 
     E = 0.0
-    prev = None
     current_z = None
     layer = 0
-    for pt in all_pts:
-        x, y, z0 = pt.X, pt.Y, pt.Z
-        z1 = z0 + z_offset
-        # Insert layer comment when Z changes beyond half tolerance
-        if current_z is None or abs(z1 - current_z) > tol/2:
-            layer += 1
-            a.append(f";Layer {layer}")
-            b.append((0.0, 0.0, 0.0))  # placeholder for layer comment
-            current_z = z1
-        if prev:
-            E += rs.Distance(prev, pt)
-        line = pl.gcodeline(
-            1,
-            x=round(x,1),
-            y=round(y,1),
-            z=round(z1,1),
-            e=round(E,1)
-        )
-        a.append(line)
-        b.append((round(x,1), round(y,1), round(z1,1)))
-        prev = pt
+    for pts in point_groups:
+        prev = None
+        for pt in pts:
+            x, y, z0 = pt.X, pt.Y, pt.Z
+            z1 = z0 + z_offset
+            if current_z is None or abs(z1 - current_z) > tol / 2.0:
+                layer += 1
+                a.append(f";Layer {layer}")
+                b.append(Rhino.Geometry.Point3d.Unset)
+                current_z = z1
+            if prev:
+                E += rs.Distance(prev, pt)
+            out_pt = Rhino.Geometry.Point3d(round(x, 1), round(y, 1), round(z1, 1))
+            line = gcl.gcodeline(
+                1,
+                x=out_pt.X,
+                y=out_pt.Y,
+                z=out_pt.Z,
+                e=round(E, 1)
+            )
+            a.append(line)
+            b.append(out_pt)
+            prev = pt
     print(f"Generated {len(a)} lines in {layer} layers.")
 
 # --- Saving ---
 if save_btn and a:
     ts = gl.timestamp()
-    gh_dir = os.path.dirname(os.path.realpath(ghdoc.Path))
-    fp = os.path.join(gh_dir, f"{ts}_{name}.gcode")
+    hourstamp = " at " + gl.timestamp(format=3)
+    base_dir = get_output_dir()
+    gcode_dir = os.path.join(base_dir, "gcode")
     try:
-        with open(fp, 'w') as f:
-            for L in a:
-                f.write(L + "\n")
-        print(f"Saved to {fp}")
+        fp = gcl.save_gcode_file(gcode_dir, name, [], a, timestamp=ts)
+        print("File Saved  " + fp + hourstamp)
     except Exception as e:
         print(f"Save failed: {e}")
 
-# outputs: a, b
+c = preview
+
+# outputs: a, b, c/preview

@@ -1,8 +1,6 @@
-
-from tracemalloc import start
-from turtle import st
 import rhinoscriptsyntax as rs
 import geometrylib as gl
+import iolib as io
 import math
 
 
@@ -27,10 +25,9 @@ def divcrvlen(crv, dist):
 
 
 def interpolatept(pt1, pt2, factor):
-
-    x = pt2[0] * factor + pt1[0] * (1-factor)
-    y = pt2[1] * factor + pt1[1] * (1-factor)
-    z = pt2[2] * factor + pt1[2] * (1-factor)
+    x = gl.lerp(pt1[0], pt2[0], factor)
+    y = gl.lerp(pt1[1], pt2[1], factor)
+    z = gl.lerp(pt1[2], pt2[2], factor)
 
     return([x, y, z])
 
@@ -142,22 +139,23 @@ def remap2dpointdomain(pt, idom, odom):
 
 def bboxplanedomain(obj, plane="xy"):
     """Creates a bounding box and returns the domain for a certain plane"""
-    bbox = rs.BoundingBox(obj)
-    if not bbox:
+    bounds = gl.bbox_bounds(obj)
+    if not bounds:
         print("unable to get object dimensions")
         return
+    minx, miny, minz, maxx, maxy, maxz = bounds
     plane = plane.lower()
     if plane == "xy":
-        domx = (bbox[0][0], bbox[1][0])
-        domy = (bbox[0][1], bbox[3][1])
+        domx = (minx, maxx)
+        domy = (miny, maxy)
         return(domx, domy)
     elif plane == "yz":
-        domy = (bbox[3][1], bbox[0][1])
-        domz = (bbox[3][2], bbox[7][2])
+        domy = (maxy, miny)
+        domz = (minz, maxz)
         return(domy, domz)
     elif plane == "xz":
-        domx = (bbox[0][0], bbox[1][0])
-        domz = (bbox[0][2], bbox[4][2])
+        domx = (minx, maxx)
+        domz = (minz, maxz)
         return (domx, domz)
     else:
         print("Plane not recognised. Use xy, yz, or xz")
@@ -246,8 +244,15 @@ def divide_crv_equal(crv, target_distance, create_points=False, return_points=Tr
 
     Returns:
         List of points or parameters along the curve, depending on return_points.
-        Returns None if curve is invalid or target_distance is not positive.
+
+    Raises:
+        iolib.ValidationError: if crv is not a valid curve or target_distance
+            is not positive.
     """
+    if not rs.IsCurve(crv):
+        raise io.ValidationError("crv is not a valid curve.")
+    io.validate_scalar("target_distance", target_distance, min_value=0, allow_zero=False)
+
     curve_length = rs.CurveLength(crv)
     divs = max(1, int(round(curve_length / target_distance)))
     return rs.DivideCurve(crv, divs, create_points, return_points)
@@ -273,8 +278,7 @@ def orient_cross_sections(frames, cross_section):
     return oriented_sections
 
 def rounded_rectangle(width, height, subdivisions, return_polyline=False):
-    if subdivisions < 0:
-        raise ValueError("Subdivisions cannot be negative")
+    io.validate_scalar("subdivisions", subdivisions, min_value=0, allow_zero=True)
 
     subdivisions = int(subdivisions)
 
