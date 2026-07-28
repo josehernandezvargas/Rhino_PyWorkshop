@@ -10,6 +10,10 @@ import iolib as io
 
 class KukaKRL:
 
+    MAX_LIN_VELOCITY_MPS = 0.25  # hardcoded safety cap: 250 mm/s, LIN moves must never exceed this
+    PTP_WARN_PERCENT = 10.0  # hardcoded safety threshold: warn above this PTP speed
+    PTP_MAX_PERCENT = 25.0  # hardcoded safety cap: PTP speed must never exceed this
+
     def __init__(self, name):
         self.name = name
         self.base = None
@@ -29,10 +33,14 @@ class KukaKRL:
         self.code.append(f";{text}")
     
     def set_velocity(self, velocity: float):
-        """Set the velocity in m/s. Raises a warning if velocity is unusually high."""
-        if velocity > 1:
-            print(
-                f"Speed is defined in m/s. Provided speed is {velocity} m/s. Please check the units")
+        """Set the LIN velocity in m/s. Hard-capped at MAX_LIN_VELOCITY_MPS for safety."""
+        if velocity > self.MAX_LIN_VELOCITY_MPS:
+            warnings.warn(
+                f"LIN velocity {velocity} m/s exceeds the hardcoded "
+                f"{self.MAX_LIN_VELOCITY_MPS * 1000:.0f} mm/s safety cap; clamping.",
+                UserWarning,
+            )
+            velocity = self.MAX_LIN_VELOCITY_MPS
         self.code.append(f"$VEL.CP={velocity}")
 
     def _validate_percent(self, value: float, label: str, min_value: float = 0, max_value: float = 100):
@@ -43,20 +51,22 @@ class KukaKRL:
         """
         Validate PTP speed percent for safer motion.
 
-        Warn above 20% and cap at 50% as a hard safety limit.
+        Warn above PTP_WARN_PERCENT and hard-cap at PTP_MAX_PERCENT.
         """
         value = self._validate_percent(value, "PTP velocity percent", min_value=0, max_value=100)
-        if value > 20:
+        if value > self.PTP_WARN_PERCENT:
             warnings.warn(
-                f"PTP velocity is {value}%; values above 20% should be double-checked.",
+                f"PTP velocity is {value}%; values above {self.PTP_WARN_PERCENT:.0f}% "
+                "should be double-checked.",
                 UserWarning,
             )
-        if value > 50:
+        if value > self.PTP_MAX_PERCENT:
             warnings.warn(
-                f"PTP velocity {value}% exceeds safety cap; clamping to 50%.",
+                f"PTP velocity {value}% exceeds the hardcoded safety cap; "
+                f"clamping to {self.PTP_MAX_PERCENT:.0f}%.",
                 UserWarning,
             )
-            value = 50.0
+            value = self.PTP_MAX_PERCENT
         return value
     
     def _validate_tool_or_base_number(self, number, label):
@@ -139,8 +149,8 @@ class KukaKRL:
         self.code.append(";ENDFOLD (BASISTECH INI)")
         self.code.append(";ENDFOLD (INI)")
 
-        self.code.append(";FOLD STARTPOSITION - BASE IS {}, TOOL IS {}, SPEED IS 100%, POSITION IS A1 {},A2 {},A3 {},A4 {},A5 {},A6 {},E1 0,E2 0,E3 0,E4 0".format(
-            base, tool, A1, A2, A3, A4, A5, A6))
+        self.code.append(";FOLD STARTPOSITION - BASE IS {}, TOOL IS {}, SPEED IS {:.1f}%, POSITION IS A1 {},A2 {},A3 {},A4 {},A5 {},A6 {},E1 0,E2 0,E3 0,E4 0".format(
+            base, tool, ptp_velocity_percent, A1, A2, A3, A4, A5, A6))
         self.code.append("$BWDSTART = FALSE")
         self.code.append(
             "PDAT_ACT = {{VEL {vel:.1f},ACC {acc:.1f},APO_DIST {apo:.1f}}}".format(

@@ -3,20 +3,40 @@
 """Grasshopper script to generate KUKA KRL code from point paths.
 
 Inputs:
-    PTS: list of 3d points (Rhino/Grasshopper points).
+    PTS: list of 3d points (Rhino/Grasshopper points). Alternative to CRVS -
+         provide exactly one of the two.
+    CRVS: list of curves, alternative to PTS. Each curve is treated as a
+         separate deposited line: the extruder stops for the travel move
+         between curves and resumes at the start of the next one. Polylines
+         are read via their control points; other curves are first converted
+         to a polyline (5 mm max deviation, 10 mm min segment length). When
+         CRVS is used, VEL must be a single number (applied uniformly).
     VEL: list of velocities in mm/s (same length as PTS) or a single number.
          If a single number is provided, it is used for all points.
-         Values > 1 are interpreted as mm/s (max 1000 mm/s = 1 m/s).
-         Values <= 1 are interpreted as m/s.
+         Values > 1 are interpreted as mm/s, values <= 1 as m/s. Hardcoded
+         safety cap: clamped to 250 mm/s (see MAX_LIN_SPEED_MM_S).
     startpos: list/tuple with 6 joint angles (int or float).
     name: base program name (str).
     startpt: 3d point for initial approach.
     save: whether to write the KRL file (bool).
-    PTP: optional PTP speed percentage (warn > 20%, cap at 50%).
+    PTP: optional PTP speed percentage. Hardcoded safety cap: warn above 10%,
+         hard-clamped to 25% (see PTP_WARN_PERCENT/PTP_MAX_PERCENT). Defaults
+         to 20% if not supplied.
     PTP_ACC: optional PTP acceleration percentage (0-100).
     PTP_APO: optional PTP APO distance in mm (>=0).
+    MACHINE: optional machine/material profile id or path (str). Resolved
+             against machine_settings/ (e.g. "kuka" -> machine_settings/kuka.json).
+             Must provide 'bead_width', 'layer_height' (mm), 'Density' (kg/m3)
+             and 'Water ratio' (%) for the material estimate; 'flow_factor'
+             and 'Waste per batch (kg)' are optional (default 1.0 / 0.0).
+             Defaults to "kuka" if not supplied.
 Output:
     a: the generated KRL code (list of strings).
+    material: text summary of the material estimate (str) - add a matching
+              output param on the component (alongside previewpts/previewpath)
+              to view it in a Panel.
+    previewpts: the full toolpath points, for previewing in Rhino.
+    previewpath: a polyline through previewpts.
 """
 
 __author__ = "joseh"
@@ -24,6 +44,7 @@ __version__ = "2024.06.28"
 
 import rhinoscriptsyntax as rs
 import kukalib as kl
+import gcodelib as gcl
 import Grasshopper as gh
 import os
 #import generalfunctions as gf
@@ -33,9 +54,31 @@ import time
 timestamp = time.strftime("%y%m%d")  # adds a timestamp with the date
 hourstamp = " at " + time.strftime("%X")  # a timestamp with the hour
 
+MAX_LIN_SPEED_MM_S = 250.0  # hardcoded safety cap: LIN moves must never exceed this
+
 def _is_number(value):
     """Return True when value is an int or float (not a bool)."""
     return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _coerce_number(value):
+    """Coerce common Grasshopper quirks (text panels, 1-item tree branches,
+    GH_Number wrappers) into a plain float. Returns None if not coercible."""
+    if isinstance(value, (list, tuple)) and len(value) == 1:
+        value = value[0]
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 def _warn(message):
     """Emit a Grasshopper warning if available, otherwise print."""
@@ -70,6 +113,30 @@ def _coerce_point(name_label, value):
     return pt
 
 
+def _coerce_curve(name_label, value):
+    """Coerce a Rhino/Grasshopper curve."""
+    crv = rs.coercecurve(value)
+    if not crv:
+        raise Exception("{} should be a valid curve.".format(name_label))
+    return crv
+
+
+def _curve_to_points(name_label, curve):
+    """Extract ordered points from a curve for deposition.
+
+    Polylines use their own control points. Any other curve is first
+    approximated as a polyline (5 mm max deviation, 10 mm min segment
+    length) and the same control points are then used.
+    """
+    if rs.IsPolyline(curve):
+        pts = rs.PolylineVertices(curve)
+    else:
+        pts = gcl.curve_to_polyline_points(curve, tolerance=5.0, min_edge_length=10.0)
+    if not pts:
+        raise Exception("{} could not be converted to points.".format(name_label))
+    return list(pts)
+
+
 def _normalize_velocities(vel_value, count):
     """Normalize VEL input to a list of m/s values with validation."""
     if _is_number(vel_value):
@@ -91,9 +158,7 @@ def _normalize_velocities(vel_value, count):
         if v <= 0:
             raise Exception("VEL[{}] should be greater than 0.".format(i))
         if v > 1:
-            # Interpret as mm/s, cap at 1000 mm/s (1 m/s)
-            if v > 1000:
-                raise Exception("VEL[{}] exceeds 1 m/s. Max is 1000 mm/s.".format(i))
+            # Interpret as mm/s
             v_mps = v / 1000.0
         else:
             # Interpret as m/s
@@ -101,25 +166,35 @@ def _normalize_velocities(vel_value, count):
 
         if v_mps < 0.005:
             _warn("VEL[{}] is below 5 mm/s; please double-check.".format(i))
+        if v_mps * 1000.0 > MAX_LIN_SPEED_MM_S:
+            _warn(
+                "VEL[{}] ({:.1f} mm/s) exceeds the hardcoded {:.0f} mm/s safety "
+                "cap; clamping.".format(i, v_mps * 1000.0, MAX_LIN_SPEED_MM_S)
+            )
+            v_mps = MAX_LIN_SPEED_MM_S / 1000.0
         normalized.append(round(v_mps, 3))
 
     return normalized
 
 
+PTP_WARN_PERCENT = 10.0  # hardcoded safety threshold: warn above this PTP speed
+PTP_MAX_PERCENT = 25.0  # hardcoded safety cap: PTP speed must never exceed this
+
+
 def _validate_ptp_percent(ptp_value):
-    """Validate PTP speed percentage; preserve legacy default when omitted."""
+    """Validate PTP speed percentage; hardcoded safety cap (warn/clamp thresholds above)."""
     if ptp_value is None:
-        # Keep legacy header behavior unless user overrides PTP explicitly.
-        return 100.0
+        ptp_value = 20.0  # a safe, sub-cap default when PTP isn't supplied
     if not _is_number(ptp_value):
         raise Exception("PTP should be a number (percentage).")
-    if ptp_value > 20:
-        _warn("PTP speed is above 20%; please double-check.")
-    if ptp_value > 50:
-        _warn("PTP speed above 50% is not allowed; capping to 50%.")
-        return 50
     if ptp_value <= 0:
         raise Exception("PTP should be greater than 0.")
+    if ptp_value > PTP_WARN_PERCENT:
+        _warn("PTP speed is above {:.0f}%; please double-check.".format(PTP_WARN_PERCENT))
+    if ptp_value > PTP_MAX_PERCENT:
+        _warn("PTP speed above {:.0f}% is not allowed; capping to {:.0f}%.".format(
+            PTP_MAX_PERCENT, PTP_MAX_PERCENT))
+        return PTP_MAX_PERCENT
     return float(ptp_value)
 
 
@@ -141,9 +216,7 @@ def _validate_ptp_apo(ptp_apo_value):
     return float(ptp_apo_value)
 
 
-def _validate_inputs(
-    pts,
-    vel,
+def _validate_common_inputs(
     startpos,
     program_name,
     startpt_value,
@@ -152,13 +225,21 @@ def _validate_inputs(
     ptp_acc_value,
     ptp_apo_value,
 ):
-    """Validate Grasshopper inputs and return normalized values."""
-    pts = _require_nonempty_list("PTS", pts)
-    vel = _normalize_velocities(vel, len(pts))
-
+    """Validate the Grasshopper inputs shared by both PTS and CRVS modes."""
     startpos = _require_list("startpos", startpos)
-    if len(startpos) != 6 or not all(_is_number(v) for v in startpos):
-        raise Exception("startpos should be a list/tuple with 6 numeric joint angles.")
+    if len(startpos) != 6:
+        raise Exception(
+            "startpos should have exactly 6 joint angles, got {}.".format(len(startpos))
+        )
+    coerced_startpos = []
+    for i, v in enumerate(startpos):
+        num = _coerce_number(v)
+        if num is None:
+            raise Exception(
+                "startpos[{}] ({!r}) should be a numeric joint angle.".format(i, v)
+            )
+        coerced_startpos.append(num)
+    startpos = coerced_startpos
 
     if not isinstance(program_name, str) or not program_name.strip():
         raise Exception("name should be a non-empty string.")
@@ -173,6 +254,44 @@ def _validate_inputs(
     ptp_apo_value = _validate_ptp_apo(ptp_apo_value)
 
     return (
+        startpos,
+        program_name,
+        startpt_value,
+        save_flag,
+        ptp_value,
+        ptp_acc_value,
+        ptp_apo_value,
+    )
+
+
+def _validate_inputs(
+    pts,
+    vel,
+    startpos,
+    program_name,
+    startpt_value,
+    save_flag,
+    ptp_value,
+    ptp_acc_value,
+    ptp_apo_value,
+):
+    """Validate Grasshopper inputs (PTS mode) and return normalized values."""
+    pts = _require_nonempty_list("PTS", pts)
+    vel = _normalize_velocities(vel, len(pts))
+
+    (
+        startpos,
+        program_name,
+        startpt_value,
+        save_flag,
+        ptp_value,
+        ptp_acc_value,
+        ptp_apo_value,
+    ) = _validate_common_inputs(
+        startpos, program_name, startpt_value, save_flag, ptp_value, ptp_acc_value, ptp_apo_value
+    )
+
+    return (
         pts,
         vel,
         startpos,
@@ -183,6 +302,27 @@ def _validate_inputs(
         ptp_acc_value,
         ptp_apo_value,
     )
+
+
+def _validate_uniform_velocity(vel_value):
+    """Validate VEL as a single scalar velocity (m/s), required for CRVS mode."""
+    if isinstance(vel_value, (list, tuple)):
+        if len(vel_value) != 1:
+            raise Exception("VEL should be a single number when using CRVS.")
+        vel_value = vel_value[0]
+    if not _is_number(vel_value):
+        raise Exception("VEL should be a number when using CRVS.")
+    return _normalize_velocities(vel_value, 1)[0]
+
+
+def _validate_curve_inputs(crvs_value):
+    """Validate CRVS and convert each curve into an ordered point list."""
+    crvs_value = _require_nonempty_list("CRVS", crvs_value)
+    point_groups = []
+    for i, crv in enumerate(crvs_value):
+        curve = _coerce_curve("CRVS[{}]".format(i), crv)
+        point_groups.append(_curve_to_points("CRVS[{}]".format(i), curve))
+    return point_groups
 
 def estimate_print_volume(print_length, bead_width, layer_height, flow_factor=1.0,):
     """
@@ -236,61 +376,115 @@ def _add_krl_header(krl_obj, start_position, ptp_value, ptp_acc_value, ptp_apo_v
         )
         krl_obj.code.append("BAS (#PTP_PARAMS,{:.1f})".format(ptp_value))
 
-def estimate_material_requirements(
-    volume_m3,
-    material_json,
-):
+def estimate_material_mass(volume_l, density_kg_m3, water_ratio, waste_kg=0.0):
     """
-    Convert a target print volume into required premix and water.
+    Convert a deposited volume into dry-mix (premix) and water mass, in grams.
 
     Parameters
     ----------
-    volume_m3 : float
-        Target deposited volume (m³).
-    material_json : str
-        Path to a material JSON file.
+    volume_l : float
+        Deposited volume (litres).
+    density_kg_m3 : float
+        Density of the fresh/mixed material (kg/m3).
+    water_ratio : float
+        Water-to-dry-mix ratio as a fraction (e.g. 0.145 for 14.5%).
+    waste_kg : float, optional
+        Fixed dry-mix allowance added per batch for mixer/pump waste (kg).
 
     Returns
     -------
     dict
-        {
-            "total_mass_kg": float,
-            "premix_kg": float,
-            "water_kg": float,
-        }
+        {"dry_mix_g": float, "water_g": float, "total_g": float}
     """
-
-    with open(material_json, "r") as file:
-        material = json.load(file)
-
-    density = material["density_kg_m3"]
-    water_ratio = material["water"]["water_premix_ratio"]
-
-    total_mass = volume_m3 * density
-    premix_mass = total_mass / (1.0 + water_ratio)
-    water_mass = premix_mass * water_ratio
+    wet_mass_kg = (volume_l / 1000.0) * density_kg_m3
+    dry_mix_kg = wet_mass_kg / (1.0 + water_ratio) + waste_kg
+    water_kg = dry_mix_kg * water_ratio
 
     return {
-        "total_mass_kg": total_mass,
-        "premix_kg": premix_mass,
-        "water_kg": water_mass,
+        "dry_mix_g": dry_mix_kg * 1000.0,
+        "water_g": water_kg * 1000.0,
+        "total_g": (dry_mix_kg + water_kg) * 1000.0,
+    }
+
+
+def _profile_field(profile, machine_id, key, required=True, default=None):
+    """Look up a machine_settings field, tolerant of case variants."""
+    for candidate in (key, key.lower(), key.upper()):
+        if candidate in profile:
+            return profile[candidate]
+    if required:
+        raise Exception(
+            "Machine profile '{}' is missing '{}' - add it to the JSON to enable "
+            "the material estimate.".format(machine_id, key)
+        )
+    return default
+
+
+def _resolve_machine_profile(machine_value):
+    """Load bead/layer geometry and material properties from a machine_settings profile."""
+    machine_id = machine_value if machine_value else "kuka"
+    try:
+        profile = gcl.load_machine_properties(machine_id)
+    except Exception as exc:
+        raise Exception("Could not load machine profile '{}': {}".format(machine_id, exc))
+
+    return {
+        "bead_width": float(_profile_field(profile, machine_id, "bead_width")),
+        "layer_height": float(_profile_field(profile, machine_id, "layer_height")),
+        "flow_factor": float(_profile_field(profile, machine_id, "flow_factor", required=False, default=1.0)),
+        "density_kg_m3": float(_profile_field(profile, machine_id, "Density")),
+        "water_ratio": float(_profile_field(profile, machine_id, "Water ratio")) / 100.0,
+        "waste_kg": float(_profile_field(profile, machine_id, "Waste per batch (kg)", required=False, default=0.0)),
     }
 
 
 PTP = globals().get("PTP", None)
 PTP_ACC = globals().get("PTP_ACC", None)
 PTP_APO = globals().get("PTP_APO", None)
+MACHINE = globals().get("MACHINE", None)
+PTS = globals().get("PTS", None)
+CRVS = globals().get("CRVS", None)
 
-PTS, VEL, startpos, name, startpt, save, PTP, PTP_ACC, PTP_APO = _validate_inputs(
-    PTS, VEL, startpos, name, startpt, save, PTP, PTP_ACC, PTP_APO
-)
+using_curves = isinstance(CRVS, (list, tuple)) and len(CRVS) > 0
+
+if using_curves:
+    if isinstance(PTS, (list, tuple)) and len(PTS) > 0:
+        raise Exception("Provide either PTS or CRVS, not both.")
+    point_groups = _validate_curve_inputs(CRVS)
+    vel_scalar = _validate_uniform_velocity(VEL)
+    (
+        startpos,
+        name,
+        startpt,
+        save,
+        PTP,
+        PTP_ACC,
+        PTP_APO,
+    ) = _validate_common_inputs(startpos, name, startpt, save, PTP, PTP_ACC, PTP_APO)
+else:
+    PTS, VEL, startpos, name, startpt, save, PTP, PTP_ACC, PTP_APO = _validate_inputs(
+        PTS, VEL, startpos, name, startpt, save, PTP, PTP_ACC, PTP_APO
+    )
+    point_groups = [PTS]
+    vel_scalar = None
+
+
+def _point_velocity(point_index):
+    """Return the velocity (m/s) to use for a given point index."""
+    return vel_scalar if using_curves else VEL[point_index]
+
+
+machine_profile = _resolve_machine_profile(MACHINE)
+bead_width = machine_profile["bead_width"]
+layer_height = machine_profile["layer_height"]
+flow_factor = machine_profile["flow_factor"]
 
 name = name + "_" + timestamp
 krl = kl.KukaKRL(name)
 
 previewpts = []
 
-zero = 5 # height correction
+zero = 9 # height correction for first layer
 
 
 krl.set_tool(6)
@@ -308,6 +502,8 @@ base = 1
 
 # ADD HEADER
 _add_krl_header(krl, startpos, PTP, PTP_ACC, PTP_APO)
+
+material_comment_index = len(krl.code)  # material estimate comments are spliced in here later
 
 A1, A2, A3, A4, A5, A6 = startpos
 
@@ -380,29 +576,46 @@ firstpt = (startpt[0] , startpt[1], 50.0) #HACK: hardcoded 50 mm height for firs
 
 
 # Main loop
-for i, pt in enumerate(PTS):
-    vel = VEL[i] # velocity in m/s
-    pt = _coerce_point("PTS[{}]".format(i), pt)
-    if i == 0:
+point_index = 0
+for g, group in enumerate(point_groups):
+    label = "CRVS[{}] point {{}}".format(g) if using_curves else "PTS[{}]"
+    group_pts = [_coerce_point(label.format(k), p) for k, p in enumerate(group)]
+
+    if g == 0:
+        vel = _point_velocity(point_index)
         krl.code.append(";FOLD LIN SPEED IS {} m/sec, INTERPOLATION SETTINGS IN FOLD".format(vel))
         krl.code.append("$VEL.CP={}".format(vel))
         krl.code.append("$ADVANCE=3")
         krl.code.append(";ENDFOLD")
-        krl.code.append("$OUT[3]=FALSE")
+        krl.code.append("$OUT[3]=FALSE") # Start the extruder
         plane = (firstpt[0],firstpt[1],firstpt[2]+ zero, 0, 0, 0 )
         krl.lin(plane)
 #        krl.LIN(secondpt[0],secondpt[1],secondpt[2], 0, 0, 0, 0, 0)
         previewpts.append(firstpt)
 #        previewpts.append(secondpt)
         lastvel = vel
-    if vel != lastvel:
-        krl.set_velocity(vel)
+    else:
+        # Travel move to the next curve: stop the extruder, move to its
+        # start point, then resume before depositing along it.
+        krl.code.append("$OUT[3]=TRUE") # Stop the extruder for the travel move
+        travel_pt = group_pts[0]
+        krl.lin([travel_pt.X, travel_pt.Y, travel_pt.Z+zero, 0, 0, 0])
+        previewpts.append(travel_pt)
+        krl.code.append("$OUT[3]=FALSE") # Resume the extruder for this line
+        lastpt = travel_pt
+        group_pts = group_pts[1:] # already reached via the travel move above
+
+    for pt in group_pts:
+        vel = _point_velocity(point_index)
+        if vel != lastvel:
+            krl.set_velocity(vel)
 #    print vel
-    krl.lin([pt.X, pt.Y, pt.Z+zero, 0, 0, 0])
-    previewpts.append(pt)
-    lastvel = vel
-    lastpt = pt
-krl.code.append("$OUT[3]=TRUE")
+        krl.lin([pt.X, pt.Y, pt.Z+zero, 0, 0, 0])
+        previewpts.append(pt)
+        lastvel = vel
+        lastpt = pt
+        point_index += 1
+krl.code.append("$OUT[3]=TRUE") # Stop the extruder
 
 # Rise the nozzle quickly after the last point
 krl.set_velocity(0.25)
@@ -432,6 +645,36 @@ file = os.path.join(krl_dir, name + extension)
 # file += '\\'+ name + extension
 
 previewpath = rs.AddPolyline(previewpts)
+
+# Material estimate, from the previewpath length (includes lead-in/lead-out travel)
+path_length_mm = rs.CurveLength(previewpath)
+if path_length_mm is None:
+    raise Exception("Could not measure previewpath length for the material estimate.")
+volume_info = estimate_print_volume(path_length_mm, bead_width, layer_height, flow_factor)
+mass_info = estimate_material_mass(
+    volume_info["volume_l"],
+    machine_profile["density_kg_m3"],
+    machine_profile["water_ratio"],
+    machine_profile["waste_kg"],
+)
+
+# Material estimate summary, shared by the "material" text output, the
+# Python print, and the KRL comment block below.
+material_summary_lines = [
+    "Path length: {:.2f} m".format(path_length_mm / 1000.0),
+    "Bead width x layer height: {:.1f} x {:.1f} mm (flow factor {:.2f})".format(
+        bead_width, layer_height, flow_factor),
+    "Estimated volume: {:.3f} L".format(volume_info["volume_l"]),
+    "Estimated dry mix: {:.1f} g, water: {:.1f} g, total: {:.1f} g".format(
+        mass_info["dry_mix_g"], mass_info["water_g"], mass_info["total_g"]),
+]
+material = "\n".join(material_summary_lines)
+print(material)
+
+material_comment_lines = [";FOLD MATERIAL ESTIMATE"]
+material_comment_lines += [";" + line for line in material_summary_lines]
+material_comment_lines.append(";ENDFOLD")
+krl.code[material_comment_index:material_comment_index] = material_comment_lines
 
 
 if save:

@@ -1,0 +1,10 @@
+{
+    "material_name": "SIKACRETE_751-3D",
+    "type": "robot_arm",
+    "bead_width": 20.0,
+    "layer_height": 10.0,
+    "flow_factor": 1.0,
+    "Density" :	2140.0,
+    "Waste per batch (kg)":  5.0,
+    "Water ratio": 14.5
+}
