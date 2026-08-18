@@ -30,17 +30,63 @@ Inputs:
              and 'Water ratio' (%) for the material estimate; 'flow_factor'
              and 'Waste per batch (kg)' are optional (default 1.0 / 0.0).
              Defaults to "kuka" if not supplied.
+    STANDBY_IN: optional digital input number that requests standby (default 11).
+    RESUME_IN: optional digital input number that leaves standby (default 12).
+    REDO_IN: optional digital input number read on leaving standby; when TRUE the
+             layer that just finished is printed again (default 13). Ignored when
+             the layer was aborted mid-way, since that one always gets repeated.
+    SAFE_Z: optional clearance in mm used to lift clear of the part before
+            travelling to the park position, and to approach a layer on
+            re-entry (default 50).
+    LAYER_TOL: optional Z tolerance in mm for grouping curves into layers
+               (default: half the profile's layer_height, minimum 0.1).
+    FADE_OUT: optional non-negative integer (default 0). The last FADE_OUT
+              points of the toolpath are travelled with the extruder off
+              ($OUT[3]=TRUE), for a trailing loop (e.g. spiraliser.py's
+              fade_out lap) that closes the seam without depositing material.
 Output:
-    a: the generated KRL code (list of strings).
+    a: the generated KRL code (list of strings), including the local subprograms.
     material: text summary of the material estimate (str) - add a matching
               output param on the component (alongside previewpts/previewpath)
               to view it in a Panel.
+    layers: text summary of the detected layers and their subprogram names (str) -
+            also needs a matching output param on the component.
     previewpts: the full toolpath points, for previewing in Rhino.
     previewpath: a polyline through previewpts.
+
+Standby / layer recovery
+------------------------
+The deposition path is emitted as one local KRL subprogram per layer (L001,
+L002, ...) plus a dispatcher loop in the main program, so any single layer can
+be re-run without restarting the print:
+
+    REPEAT
+      SWITCH LAYER_N ... L00n ( ) ... ENDSWITCH
+      <standby / repeat / advance decision>
+    UNTIL LAYER_N > LAYER_COUNT
+
+Switching to standby works two ways, both driven by $IN[STANDBY_IN]:
+
+  * mid-layer - a GLOBAL INTERRUPT aborts the move in progress (BRAKE/RESUME),
+    which drops execution back into the dispatcher. The aborted layer is always
+    repeated, because it is by definition incomplete.
+  * between layers - the dispatcher checks the same input after each layer
+    returns normally. $IN[REDO_IN] then decides repeat vs. continue.
+
+STANDBY ( ) lifts SAFE_Z straight up from wherever the robot stopped, travels
+over the start point at that height, and runs the extruder there so material
+keeps moving while the operator clears the failed layer. It holds until
+$IN[STANDBY_IN] goes FALSE and $IN[RESUME_IN] goes TRUE, then sets the re-entry
+flag so the next layer approaches from SAFE_Z above its own start point instead
+of driving straight through the part.
+
+Layers are detected by grouping consecutive CRVS curves whose average Z is
+within LAYER_TOL. In PTS mode the whole path is a single layer, so use CRVS if
+you want layer-level recovery.
 """
 
 __author__ = "joseh"
-__version__ = "2024.06.28"
+__version__ = "2026.07.28"
 
 import rhinoscriptsyntax as rs
 import kukalib as kl
@@ -55,6 +101,27 @@ timestamp = time.strftime("%y%m%d")  # adds a timestamp with the date
 hourstamp = " at " + time.strftime("%X")  # a timestamp with the hour
 
 MAX_LIN_SPEED_MM_S = 250.0  # hardcoded safety cap: LIN moves must never exceed this
+
+# Extruder control. NOTE the inverted logic: $OUT[3]=FALSE runs the extruder.
+EXTRUDER_OUT = 3
+EXTRUDER_ON = False
+EXTRUDER_OFF = True
+
+# Standby / layer-recovery wiring
+STANDBY_INT = 20  # KRL interrupt number (also its priority) for the standby request
+FLAG_ABORT = 1  # $FLAG[1]: the layer in progress was aborted by the interrupt
+FLAG_REENTRY = 2  # $FLAG[2]: the next layer must be approached from a safe height
+DEFAULT_STANDBY_IN = 11
+DEFAULT_RESUME_IN = 12
+DEFAULT_REDO_IN = 13
+DEFAULT_SAFE_Z = 50.0  # mm of clearance for lift/park/re-entry moves
+TRAVEL_VEL = 0.25  # m/s for standby and re-entry travel moves
+
+
+def _krl_bool(state):
+    """KRL literal for a Python bool."""
+    return "TRUE" if state else "FALSE"
+
 
 def _is_number(value):
     """Return True when value is an int or float (not a bool)."""
@@ -324,6 +391,106 @@ def _validate_curve_inputs(crvs_value):
         point_groups.append(_curve_to_points("CRVS[{}]".format(i), curve))
     return point_groups
 
+def _validate_digital_input(name_label, value, default):
+    """Validate an optional digital-input number, falling back to a default."""
+    if value is None:
+        return default
+    num = _coerce_number(value)
+    if num is None or num != int(num) or int(num) < 1 or int(num) > 4096:
+        raise Exception(
+            "{} should be an integer digital input number between 1 and 4096.".format(name_label)
+        )
+    return int(num)
+
+
+def _validate_safe_z(value):
+    """Validate the optional SAFE_Z clearance in mm."""
+    if value is None:
+        return DEFAULT_SAFE_Z
+    num = _coerce_number(value)
+    if num is None or num <= 0:
+        raise Exception("SAFE_Z should be a number greater than 0 (mm).")
+    return num
+
+
+def _validate_layer_tol(value, profile_layer_height):
+    """Validate the optional layer-grouping Z tolerance in mm."""
+    if value is None:
+        return max(0.1, profile_layer_height * 0.5)
+    num = _coerce_number(value)
+    if num is None or num <= 0:
+        raise Exception("LAYER_TOL should be a number greater than 0 (mm).")
+    return num
+
+
+def _validate_fade_out(value, total_points):
+    """Validate the optional FADE_OUT tail point count (extruder off near the end)."""
+    if value is None:
+        return 0
+    num = _coerce_number(value)
+    if num is None or num != int(num) or int(num) < 0:
+        raise Exception("FADE_OUT should be a non-negative integer point count.")
+    num = int(num)
+    if num > total_points:
+        raise Exception(
+            "FADE_OUT ({}) should not exceed the total point count ({}).".format(num, total_points)
+        )
+    return num
+
+
+def _average_z(pts):
+    """Average Z of a point list, used as a layer's reference height."""
+    return sum(p.Z for p in pts) / float(len(pts))
+
+
+def _group_into_layers(groups, tol):
+    """Group consecutive point lists into layers by their average Z.
+
+    Curves are assumed to arrive in slicer order (bottom-up): a new layer
+    starts as soon as a curve's average Z differs from the current layer's
+    reference Z by more than tol. Curves that share a height but are not
+    consecutive therefore end up in separate layers, which keeps the emitted
+    order identical to the input order.
+    """
+    layers = []
+    current = []
+    reference_z = None
+    for pts in groups:
+        z = _average_z(pts)
+        if reference_z is None:
+            reference_z = z
+            current = [pts]
+        elif abs(z - reference_z) <= tol:
+            current.append(pts)
+        else:
+            layers.append(current)
+            current = [pts]
+            reference_z = z
+    if current:
+        layers.append(current)
+    return layers
+
+
+def _require_kukalib_features(krl_obj):
+    """Fail loudly when Rhino has an older kukalib cached in memory.
+
+    The layer/standby structure needs the subprogram + declaration API added to
+    kukalib; without it the script would emit a program with no END and no
+    layer subprograms.
+    """
+    missing = [
+        attr
+        for attr in ("add_declaration", "start_subprogram", "end_subprogram",
+                     "full_program", "add_line", "lin_rel", "wait_for_input")
+        if not hasattr(krl_obj, attr)
+    ]
+    if missing:
+        raise Exception(
+            "kukalib is out of date (missing {}). Restart Rhino so the updated "
+            "libs/kukalib.py is reloaded.".format(", ".join(missing))
+        )
+
+
 def estimate_print_volume(print_length, bead_width, layer_height, flow_factor=1.0,):
     """
     Estimate the deposited material volume from toolpath length.
@@ -444,6 +611,12 @@ PTP_APO = globals().get("PTP_APO", None)
 MACHINE = globals().get("MACHINE", None)
 PTS = globals().get("PTS", None)
 CRVS = globals().get("CRVS", None)
+STANDBY_IN = globals().get("STANDBY_IN", None)
+RESUME_IN = globals().get("RESUME_IN", None)
+REDO_IN = globals().get("REDO_IN", None)
+SAFE_Z = globals().get("SAFE_Z", None)
+LAYER_TOL = globals().get("LAYER_TOL", None)
+FADE_OUT = globals().get("FADE_OUT", None)
 
 using_curves = isinstance(CRVS, (list, tuple)) and len(CRVS) > 0
 
@@ -479,8 +652,17 @@ bead_width = machine_profile["bead_width"]
 layer_height = machine_profile["layer_height"]
 flow_factor = machine_profile["flow_factor"]
 
+STANDBY_IN = _validate_digital_input("STANDBY_IN", STANDBY_IN, DEFAULT_STANDBY_IN)
+RESUME_IN = _validate_digital_input("RESUME_IN", RESUME_IN, DEFAULT_RESUME_IN)
+REDO_IN = _validate_digital_input("REDO_IN", REDO_IN, DEFAULT_REDO_IN)
+if len({STANDBY_IN, RESUME_IN, REDO_IN}) != 3:
+    raise Exception("STANDBY_IN, RESUME_IN and REDO_IN must be three different inputs.")
+SAFE_Z = _validate_safe_z(SAFE_Z)
+LAYER_TOL = _validate_layer_tol(LAYER_TOL, layer_height)
+
 name = name + "_" + timestamp
 krl = kl.KukaKRL(name)
+_require_kukalib_features(krl)
 
 previewpts = []
 
@@ -502,8 +684,6 @@ base = 1
 
 # ADD HEADER
 _add_krl_header(krl, startpos, PTP, PTP_ACC, PTP_APO)
-
-material_comment_index = len(krl.code)  # material estimate comments are spliced in here later
 
 A1, A2, A3, A4, A5, A6 = startpos
 
@@ -575,47 +755,205 @@ firstpt = (startpt[0] , startpt[1], 50.0) #HACK: hardcoded 50 mm height for firs
 #secondpt = (100.0 ,1450.0, 10.0)
 
 
-# Main loop
-point_index = 0
+# Coerce every curve/point group up front so layers can be detected before any
+# KRL is emitted - the dispatcher needs to know the layer count.
+coerced_groups = []
 for g, group in enumerate(point_groups):
     label = "CRVS[{}] point {{}}".format(g) if using_curves else "PTS[{}]"
-    group_pts = [_coerce_point(label.format(k), p) for k, p in enumerate(group)]
+    coerced_groups.append([_coerce_point(label.format(k), p) for k, p in enumerate(group)])
 
-    if g == 0:
-        vel = _point_velocity(point_index)
-        krl.code.append(";FOLD LIN SPEED IS {} m/sec, INTERPOLATION SETTINGS IN FOLD".format(vel))
-        krl.code.append("$VEL.CP={}".format(vel))
-        krl.code.append("$ADVANCE=3")
-        krl.code.append(";ENDFOLD")
-        krl.code.append("$OUT[3]=FALSE") # Start the extruder
-        plane = (firstpt[0],firstpt[1],firstpt[2]+ zero, 0, 0, 0 )
-        krl.lin(plane)
-#        krl.LIN(secondpt[0],secondpt[1],secondpt[2], 0, 0, 0, 0, 0)
-        previewpts.append(firstpt)
-#        previewpts.append(secondpt)
-        lastvel = vel
-    else:
-        # Travel move to the next curve: stop the extruder, move to its
-        # start point, then resume before depositing along it.
-        krl.code.append("$OUT[3]=TRUE") # Stop the extruder for the travel move
-        travel_pt = group_pts[0]
-        krl.lin([travel_pt.X, travel_pt.Y, travel_pt.Z+zero, 0, 0, 0])
-        previewpts.append(travel_pt)
-        krl.code.append("$OUT[3]=FALSE") # Resume the extruder for this line
-        lastpt = travel_pt
-        group_pts = group_pts[1:] # already reached via the travel move above
+print_layers = _group_into_layers(coerced_groups, LAYER_TOL)
+layer_count = len(print_layers)
 
-    for pt in group_pts:
-        vel = _point_velocity(point_index)
-        if vel != lastvel:
-            krl.set_velocity(vel)
-#    print vel
-        krl.lin([pt.X, pt.Y, pt.Z+zero, 0, 0, 0])
-        previewpts.append(pt)
-        lastvel = vel
-        lastpt = pt
-        point_index += 1
-krl.code.append("$OUT[3]=TRUE") # Stop the extruder
+# Total deposited points that will actually be counted by point_index below:
+# every group's first point is a travel move when it isn't the very first
+# group overall, so it isn't counted there (see the emission loop).
+_total_groups = sum(len(layer) for layer in print_layers)
+_total_raw_points = sum(len(gp) for layer in print_layers for gp in layer)
+total_points = _total_raw_points - max(0, _total_groups - 1)
+FADE_OUT = _validate_fade_out(FADE_OUT, total_points)
+fade_out_start_index = total_points - FADE_OUT
+
+# Standby / layer-recovery declarations. These have to sit in the declaration
+# block right after DEF, so they are spliced in rather than appended.
+krl.add_declaration("DECL INT LAYER_N")
+krl.add_declaration("DECL INT LAYER_COUNT")
+krl.add_declaration(
+    "GLOBAL INTERRUPT DECL {} WHEN $IN[{}]==TRUE DO IR_STANDBY ( )".format(
+        STANDBY_INT, STANDBY_IN)
+)
+
+# Captured after the declarations above, since those are spliced into the code
+# list and would otherwise shift this index.
+material_comment_index = len(krl.code)  # material estimate comments are spliced in here later
+
+krl.open_fold(
+    "PRINT SETUP - {} LAYER(S), STANDBY $IN[{}], RESUME $IN[{}], REDO $IN[{}]".format(
+        layer_count, STANDBY_IN, RESUME_IN, REDO_IN)
+)
+krl.add_line("LAYER_COUNT = {}".format(layer_count))
+krl.add_line("$FLAG[{}]=FALSE".format(FLAG_ABORT))
+krl.add_line("$FLAG[{}]=FALSE".format(FLAG_REENTRY))
+krl.close_fold()
+
+# Lead-in: approach the start point with the extruder already running, exactly
+# as before. The layer subprograms take over from here.
+lead_in_vel = _point_velocity(0)
+krl.code.append(";FOLD LIN SPEED IS {} m/sec, INTERPOLATION SETTINGS IN FOLD".format(lead_in_vel))
+krl.code.append("$VEL.CP={}".format(lead_in_vel))
+krl.code.append("$ADVANCE=3")
+krl.code.append(";ENDFOLD")
+krl.set_output(EXTRUDER_OUT, EXTRUDER_ON) # Start the extruder
+plane = (firstpt[0],firstpt[1],firstpt[2]+ zero, 0, 0, 0 )
+krl.lin(plane)
+previewpts.append(firstpt)
+
+# Layer dispatcher. Each pass runs one layer, then decides whether to park in
+# standby, repeat the layer, or move on to the next one.
+krl.open_fold("LAYER LOOP")
+krl.add_line("LAYER_N = 1")
+krl.add_line("REPEAT")
+krl.add_line("  $FLAG[{}]=FALSE".format(FLAG_ABORT))
+krl.add_line("  INTERRUPT ON {}".format(STANDBY_INT))
+krl.add_line("  SWITCH LAYER_N")
+for layer_index in range(layer_count):
+    krl.add_line("  CASE {}".format(layer_index + 1))
+    krl.add_line("    L{:03d} ( )".format(layer_index + 1))
+krl.add_line("  ENDSWITCH")
+krl.add_line("  INTERRUPT OFF {}".format(STANDBY_INT))
+krl.add_line("  IF $FLAG[{}]==TRUE THEN".format(FLAG_ABORT))
+krl.add_comment("    aborted part-way through: park, then print this layer again")
+krl.add_line("    STANDBY ( )")
+krl.add_line("  ELSE")
+krl.add_line("    IF $IN[{}]==TRUE THEN".format(STANDBY_IN))
+krl.add_comment("    standby asked for after a completed layer")
+krl.add_line("      STANDBY ( )")
+krl.add_line("      IF $IN[{}]==FALSE THEN".format(REDO_IN))
+krl.add_line("        LAYER_N = LAYER_N + 1")
+krl.add_line("      ENDIF")
+krl.add_line("    ELSE")
+krl.add_line("      LAYER_N = LAYER_N + 1")
+krl.add_line("    ENDIF")
+krl.add_line("  ENDIF")
+krl.add_line("UNTIL LAYER_N > LAYER_COUNT")
+krl.close_fold()
+
+krl.set_output(EXTRUDER_OUT, EXTRUDER_OFF) # Stop the extruder
+
+# --- local subprograms ------------------------------------------------------
+
+krl.start_subprogram("IR_STANDBY")
+krl.add_comment("Standby request while a layer is running: stop the extruder, abort")
+krl.add_comment("the move in progress and drop back to the layer loop in the main")
+krl.add_comment("program. RESUME returns to the level the interrupt was declared in.")
+krl.set_output(EXTRUDER_OUT, EXTRUDER_OFF)
+krl.add_line("$FLAG[{}]=TRUE".format(FLAG_ABORT))
+krl.add_line("BRAKE")
+krl.add_line("RESUME")
+krl.end_subprogram()
+
+krl.start_subprogram("STANDBY")
+krl.add_line("DECL E6POS PPARK")
+krl.add_comment("Lift clear of the part, park over the start point and keep the")
+krl.add_comment("extruder running there so material keeps moving while the operator")
+krl.add_comment("clears the failed layer.")
+krl.set_output(EXTRUDER_OUT, EXTRUDER_OFF)
+krl.set_velocity(TRAVEL_VEL)
+krl.lin_rel(z=SAFE_Z)
+krl.add_comment("keep the height reached above, only move over the start point")
+krl.add_line("PPARK = $POS_ACT")
+krl.add_line("PPARK.X = {:.1f}".format(firstpt[0]))
+krl.add_line("PPARK.Y = {:.1f}".format(firstpt[1]))
+krl.add_line("LIN PPARK")
+krl.add_comment("purge here until the operator clears the standby request")
+krl.set_output(EXTRUDER_OUT, EXTRUDER_ON)
+krl.wait_for_input(STANDBY_IN, False)
+krl.wait_for_input(RESUME_IN, True)
+krl.set_output(EXTRUDER_OUT, EXTRUDER_OFF)
+krl.add_line("$FLAG[{}]=FALSE".format(FLAG_ABORT))
+krl.add_comment("the next layer must come in from above instead of straight across")
+krl.add_line("$FLAG[{}]=TRUE".format(FLAG_REENTRY))
+krl.end_subprogram()
+
+point_index = 0
+lastpt = None
+layer_infos = []
+extruder_state = EXTRUDER_ON  # matches the lead-in state (line ~796)
+
+
+def _in_fade_out_zone(index):
+    return FADE_OUT > 0 and index >= fade_out_start_index
+
+
+def _set_extruder(state):
+    """Emit $OUT[3] only when the extruder state actually changes."""
+    global extruder_state
+    if state != extruder_state:
+        krl.set_output(EXTRUDER_OUT, state)
+        extruder_state = state
+
+for layer_index, layer_groups in enumerate(print_layers):
+    sub_name = "L{:03d}".format(layer_index + 1)
+    layer_start = layer_groups[0][0]
+    layer_z = layer_start.Z + zero
+    layer_point_count = sum(len(gp) for gp in layer_groups)
+
+    krl.start_subprogram(sub_name)
+    krl.open_fold("LAYER {} OF {} - Z {:.1f} - {} SEGMENT(S), {} POINT(S)".format(
+        layer_index + 1, layer_count, layer_z, len(layer_groups), layer_point_count))
+
+    # Re-entry approach, skipped entirely on the normal sequential path.
+    krl.add_line("IF $FLAG[{}]==TRUE THEN".format(FLAG_REENTRY))
+    krl.add_comment("  coming back from standby: drop in from above this layer's start")
+    krl.add_line("  $OUT[{}]={}".format(EXTRUDER_OUT, _krl_bool(EXTRUDER_OFF)))
+    krl.add_line("  $VEL.CP={}".format(TRAVEL_VEL))
+    krl.add_line("  LIN {{X {:.1f}, Y {:.1f}, Z {:.1f}, A 0.00, B 0.00, C 0.00, E1 0, E2 0}}".format(
+        layer_start.X, layer_start.Y, layer_z + SAFE_Z))
+    krl.add_line("  $FLAG[{}]=FALSE".format(FLAG_REENTRY))
+    if layer_index == 0:
+        # The first layer is normally entered from the lead-in with the
+        # extruder already running, so match that state here.
+        krl.add_line("  $OUT[{}]={}".format(EXTRUDER_OUT, _krl_bool(EXTRUDER_ON)))
+    krl.add_line("ENDIF")
+
+    # Reset per layer so every layer re-states its own feedrate; a layer that
+    # inherited $VEL.CP from its predecessor would run at the wrong speed when
+    # re-entered on its own.
+    lastvel = None
+
+    for group_index, group_pts in enumerate(layer_groups):
+        if layer_index > 0 or group_index > 0:
+            # Travel move to the next curve: stop the extruder, move to its
+            # start point, then resume before depositing along it - unless
+            # we're already in the fade-out tail, which stays dry.
+            _set_extruder(EXTRUDER_OFF) # Stop the extruder for the travel move
+            travel_pt = group_pts[0]
+            krl.lin([travel_pt.X, travel_pt.Y, travel_pt.Z+zero, 0, 0, 0])
+            previewpts.append(travel_pt)
+            _set_extruder(EXTRUDER_OFF if _in_fade_out_zone(point_index) else EXTRUDER_ON)
+            lastpt = travel_pt
+            group_pts = group_pts[1:] # already reached via the travel move above
+
+        for pt in group_pts:
+            vel = _point_velocity(point_index)
+            if vel != lastvel:
+                krl.set_velocity(vel)
+            _set_extruder(EXTRUDER_OFF if _in_fade_out_zone(point_index) else EXTRUDER_ON)
+            krl.lin([pt.X, pt.Y, pt.Z+zero, 0, 0, 0])
+            previewpts.append(pt)
+            lastvel = vel
+            lastpt = pt
+            point_index += 1
+
+    krl.close_fold()
+    krl.end_subprogram()
+
+    layer_infos.append({
+        "name": sub_name,
+        "z": layer_z,
+        "segments": len(layer_groups),
+        "points": layer_point_count,
+    })
 
 # Rise the nozzle quickly after the last point
 krl.set_velocity(0.25)
@@ -629,6 +967,20 @@ previewpts.append(rs.AddPoint(firstpt[0], firstpt[1], lastpt[2]+50))
 krl.lin([firstpt[0], firstpt[1], lastpt[2], 0, 0, 0])
 previewpts.append(rs.AddPoint(firstpt[0], firstpt[1], lastpt[2]))
 krl.code.append("$OUT[3]=FALSE")
+
+# Layer map, so the layer number on the pendant can be matched to a subprogram
+# and a height.
+layer_summary_lines = [
+    "{} layer(s), grouped by Z within {:.2f} mm".format(layer_count, LAYER_TOL),
+    "standby $IN[{}], resume $IN[{}], redo $IN[{}], clearance {:.1f} mm".format(
+        STANDBY_IN, RESUME_IN, REDO_IN, SAFE_Z),
+]
+for i, info in enumerate(layer_infos):
+    layer_summary_lines.append(
+        "LAYER_N {:>4}  {}  Z {:8.1f}  {} segment(s)  {} point(s)".format(
+            i + 1, info["name"], info["z"], info["segments"], info["points"])
+    )
+layers = "\n".join(layer_summary_lines)
 
 
 # saves file in a /krl subfolder. It will be created if it doesn't exist
@@ -670,6 +1022,7 @@ material_summary_lines = [
 ]
 material = "\n".join(material_summary_lines)
 print(material)
+print(layers)
 
 material_comment_lines = [";FOLD MATERIAL ESTIMATE"]
 material_comment_lines += [";" + line for line in material_summary_lines]
@@ -687,4 +1040,6 @@ else:
     ghenv.Component.AddRuntimeMessage(
         gh.Kernel.GH_RuntimeMessageLevel.Warning, msg)
 
-a = krl.code
+# full_program() closes the main program with END and appends the local
+# subprograms (IR_STANDBY, STANDBY, L001...), so the panel shows what gets saved.
+a = krl.full_program()

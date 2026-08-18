@@ -520,9 +520,9 @@ def sample_coloured_parameters_from_image(crvs, srf, img, target_dist, amp_range
 # Fixed division spacing for the whole stack - every curve/segment uses this same target distance,
 # so layers end up with a consistent, predictable division count instead of one driven by image
 # colour (which previously caused mismatched division counts and scrambled points between layers).
-TARGET_DIST = 50
+TARGET_DIST = 40
 
-amp_range = (40, 20)
+amp_range = (25, 15)
 shift_range = (0, 0)
 
 # Procedural gradient constants - sampled from srf's UV domain and expressed in the ranges above.
@@ -533,7 +533,7 @@ GRADIENT_BLEND = 0.0     # 0.0 = purely image-driven, 1.0 = purely gradient-driv
 # Division points at each end of every segment kept fully straight (no offset), and additional
 # points beyond that over which amplitude ramps back up to full. Needed when input curves are
 # small relative to amp_range, otherwise the zigzag overlaps itself near segment ends.
-SKIP_POINTS = 0
+SKIP_POINTS = 1
 AMP_TAPER_POINTS = 2 
 a = generate_pattern_stack(crvs, srf, img, pattern,
                            TARGET_DIST, amp_range, shift_range,
