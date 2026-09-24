@@ -343,6 +343,6 @@ if can_generate and previewpts:
         # print the filepath and a timestamp with the hour
         print('File Saved  ' + file + hourstamp)
     else:
-        msg = "Set 'write' to True."
+        msg = "Set 'save' to True."
         ghenv.Component.AddRuntimeMessage(
             gh.Kernel.GH_RuntimeMessageLevel.Warning, msg)

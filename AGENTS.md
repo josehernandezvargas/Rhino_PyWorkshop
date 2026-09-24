@@ -37,20 +37,34 @@ nozzle diameter, G-code flavor) consumed by the G-code export path.
 This is the single most important section. Getting this wrong produces code that
 looks correct, compiles, and is subtly or completely broken in Grasshopper.
 
-### 2.1 IronPython inside Grasshopper, not CPython
+### 2.1 Rhino 8's embedded CPython 3.9, not IronPython
+
+Every script starts with a `#! python3` shebang and the code relies on f-strings,
+`from __future__ import annotations`, `str | Path` type hints, `pathlib` and
+`1_000_000` literals: this repo targets the **CPython 3.9 runtime of the Rhino 8
+*Script* component** (`%USERPROFILE%\.rhinocode\py39-rh8`), not the legacy
+IronPython 2.7 GHPython component. `iolib.py` cannot even be imported under
+IronPython 2.7. Do not write Python-2-compatible code or avoid Python 3 syntax "for
+IronPython" — an earlier version of this file said the runtime was IronPython; that
+was wrong.
 
 Every file in `libs/` except `iolib.py` imports `rhinoscriptsyntax`, `Rhino`, and/or
-`Grasshopper` at module scope. These packages only exist inside Rhino's embedded
-IronPython interpreter (GHPython components). **None of these modules can be
-`import`-ed or executed in a plain CPython session** — attempting to `import
-geometrylib` from a normal `python` shell will raise `ModuleNotFoundError:
+`Grasshopper` at module scope. These packages only exist inside Rhino. **None of these
+modules can be `import`-ed or executed in a plain CPython session** — attempting to
+`import geometrylib` from a normal `python` shell will raise `ModuleNotFoundError:
 rhinoscriptsyntax` immediately.
 
 - `iolib.py` is the **one exception**: pure standard library + optional `openpyxl`,
   no Rhino imports. It is fully importable and testable in plain CPython.
-- Everything else can only be **syntax-checked** headless (`python -m py_compile
-  path/to/file.py`, or `ast.parse(open(path).read())`), not executed or unit-tested
-  directly.
+- Everything else can be **syntax-checked** headless (`python -m py_compile
+  path/to/file.py`) and its Rhino-free logic can be exercised by importing the real
+  module against stub `rhinoscriptsyntax`/`Rhino`/`System` modules (see §2.4).
+- The installed rhinoscriptsyntax source is at
+  `%USERPROFILE%\.rhinocode\py39-rh8\site-rhinopython\rhinoscript\`. Check it
+  before assuming what an `rs.*` call returns: e.g. `rs.ColorRGBToHLS` actually returns
+  `(H, S, L)`, `rs.OffsetCurve`/`rs.JoinCurves` return *lists* of GUIDs, and
+  `rs.coerceguid` accepts a one-element list (which is why passing a `JoinCurves`
+  result straight into another `rs.*` call usually works).
 
 ### 2.2 Grasshopper's implicit globals
 
@@ -106,7 +120,7 @@ gl`, not `from . import geometrylib` or `from libs import geometrylib`).
 
 - When adding a new function to `libs/`, add it as a top-level function/class in the
   relevant flat file — do not introduce subpackages or relative imports; they will
-  not resolve the same way IronPython's GH-injected `sys.path` does, and there is no
+  not resolve the same way the GH-injected `sys.path` does, and there is no
   way to test that assumption without opening Rhino.
 - When you rename or move a function between `libs/` files, you must **grep the
   entire `scripts/` directory** for every call site (`pl.old_name`, `from printlib
@@ -131,13 +145,16 @@ what's actually available to an agent:
    before considering a change done.
 2. **Pure-logic smoke test** — for functions whose *body* does not call
    `rs.*`/`Rhino.*`/`gh.*` (e.g. `geometrylib.lerp`, `minmaxcap`, `srflib._gradient_factor`,
-   `gcodelib.calculate_flow`, `gcodelib.is_within_build_volume`, anything in `iolib.py`),
-   copy just that function's body into a throwaway script in a scratch location, exercise
-   it with plain values via `python`, then delete the scratch script. This repo's IronPython
-   files cannot be imported directly in CPython even for their Rhino-free functions,
-   because the module-level `import rhinoscriptsyntax` at the top of the file fails
-   immediately — the workaround is copying the isolated logic out, not trying to import
-   the real module.
+   `gcodelib.calculate_flow`, `gcodelib.is_within_build_volume`, all of
+   `kukalib.KukaKRL`, anything in `iolib.py`). The module-level
+   `import rhinoscriptsyntax` makes the real modules unimportable in plain CPython, so
+   either copy the function body into a throwaway script, or — better, because it
+   exercises the real code — create stub modules in a scratch folder
+   (`rhinoscriptsyntax.py` with a module-level `__getattr__` that raises
+   `NotImplementedError`, `Rhino.py` with empty `Geometry.Surface`/`Geometry.Brep`
+   classes, a `System/` package with `Guid` and `Drawing.Bitmap`), put that folder and
+   `libs/` on `sys.path`, import the real modules and monkeypatch the few `rs.*`
+   functions a test needs. Delete the scratch files afterwards.
 3. **Manual Grasshopper run** — the only way to verify anything that touches curve/surface
    geometry, GH component messaging, or file output. This repo's maintainer has Rhino
    installed and can do this; an agent generally cannot. **When you cannot run this
@@ -148,8 +165,10 @@ what's actually available to an agent:
 
 ### 2.5 Line endings & style
 
-Files use CRLF line endings (Windows repo) — `git diff`/`git status` will warn about
-LF→CRLF conversion; that's expected on this Windows checkout, not an error.
+The checkout has `core.autocrlf=true`, so git normalises line endings on commit, but on
+disk the files are mixed: some are CRLF, some LF. Preserve whatever the file you are
+editing already uses (a `git checkout -- <file>` rewrites it as CRLF); the
+"LF will be replaced by CRLF" warning is expected, not an error.
 Indentation and quote style are inconsistent across files (mix of `return(x)` and
 `return x`, single/double quotes, f-strings vs `.format()` vs `%`) — match the
 *surrounding* file's existing style rather than imposing a repo-wide style pass
@@ -190,8 +209,9 @@ of `iolib`'s public surface, not a functional package boundary.
 - **Pattern generation (porous/truss/thermal walls)**: `porous_triangular.py`,
   `porous_DC26.py`, `porous_test_patterns.py`, `sampled_porous_pattern.py`,
   `sampled_triangles.py`, `sampled_triangles_columns.py`,
-  `sampled_freeform_triangles.py` (large, ~2300 lines — the most evolved member of
-  this family), `thermal_patterns.py`, `e3d_wall.py`/`e3d_wall_test.py`. These share
+  `sampled_freeform_triangles.py` (large, ~2500 lines — the most evolved member of
+  this family), `biofab_porous_pattern.py` (polycurve-aware zig-zag stack),
+  `thermal_patterns.py`, `e3d_wall.py`/`e3d_wall_test.py`. These share
   substantial duplicated logic (parameter-evaluation dispatch, wall-opening geometry,
   curve-stacking, brep-slicing) that has **not yet** been elevated into `libs/` — see
   §6.2.
@@ -250,7 +270,7 @@ not yet started. Completed work, briefly:
 
 The folder-per-function restructuring question (splitting each `libs/*.py` into a
 folder with one file per function) was analyzed and **rejected** — it would conflict
-with the bare-module import convention (§2.3), add IronPython import-path risk for
+with the bare-module import convention (§2.3), add import-path risk for
 little benefit at this codebase's current size (largest file ~340 lines), and doesn't
 improve the Rhino-only testing constraint either way. Don't propose it again without
 a materially different justification (e.g. a single file growing past ~1000 lines).
@@ -261,10 +281,14 @@ If asked to continue this repo's consolidation work, these are the highest-value
 already-scoped-out targets (not yet implemented):
 
 1. **KUKA material estimation** (`scripts/kuka.py` → `libs/kukalib.py`): move
-   `estimate_print_volume`/`estimate_material_requirements` from script scope into
-   `kukalib.py` as plain functions. Note while doing this: `kuka.py` calls `json.load`
-   inside `estimate_material_requirements` but never imports `json` at module scope —
-   this is a live `NameError` in the current script, worth fixing in the same pass.
+   `estimate_print_volume`/`estimate_material_mass`/`_resolve_machine_profile` from
+   script scope into `kukalib.py` as plain functions. The script also re-declares
+   `kukalib`'s speed/PTP caps (`MAX_LIN_SPEED_MM_S`, `PTP_WARN_PERCENT`,
+   `PTP_MAX_PERCENT`) and `iolib`'s `_is_number`/`_require_list` helpers — collapse
+   those in the same pass, and reconcile the defaults (a default PTP of 20 % currently
+   trips the 10 % warning on every run). The earlier note about a missing
+   `import json` is obsolete: profiles now load through
+   `gcodelib.load_machine_properties`.
 2. **Elevate duplicated pattern-generation logic** into `libs/` (`srflib.py`/
    `curvelib.py`): the `_gradient_factor`/`_coerce_axis_value`/`evaluate_parameter`
    trio is independently reimplemented (with `gradient_stops`/`composite` modes that
@@ -373,3 +397,48 @@ already-scoped-out targets (not yet implemented):
   before generating a large diff — the six-phase structure used for the `gcodelib`
   consolidation (§4) is a reasonable template: land the shared library changes,
   verify, then migrate call sites script by script.
+
+## 7. Review log
+
+### 2026-09-18 — bug review before expanding functionality
+
+Fixed (headless-verified where possible, all still need a GH re-run):
+
+- `srflib`: bitmaps given as a path are now cached per file (were re-opened, never
+  disposed, once per sampled point); pixel indices clamped; `as_hsl=True` returned
+  `(H, L, S)` while documenting `(H, S, L)`; `evaluate_parameter` now shares
+  `_gradient_factor` (`GRADIENT_MODES`) so every gradient shape is accepted everywhere;
+  `build_stack_pattern` delegates to `build_gradient_pattern`; the division walk in
+  `get_division_parameters` raises instead of looping forever on a non-positive step.
+- `printlib`: `stack_curves_by_pattern` validated (a pattern letter other than A/B or a
+  zero layer height looped forever); `selfclosestpt2` window fixed at both ends;
+  `leveltoplatform`/`centerobject` raise a clear error when no bounding box exists.
+- `curvelib.offset_crv_both_sides`: offsets are checked *before* their end points are
+  used; closed curves return both offsets uncapped; invalid `cap_style` raises.
+- `kukalib`: `write_file` keeps the `DEF <name>` line in sync with a truncated file
+  name (KRC rejects mismatches); `set_velocity` validates `> 0`; docstrings of
+  `ptp`/`lin` corrected.
+- `gcodelib`: `load_machine_properties` rejects non-string ids; `GCodeLib`
+  guards against a missing bounding box; `calculate_flow` documents the `*10` factor.
+- `wasp_delta.py`: header bounds and the delta build-volume check now run on the
+  *centred* geometry (they ran on the raw points); dead O(n²) `selfclosestpt2` call
+  disabled. **Output header values change — re-run and diff.**
+- `adaptive_slicing.py`: missing `import Grasshopper as gh`. `img_projection.py`:
+  surface normal was evaluated at image pixel coordinates instead of the surface UV.
+  `porous_DC26.py`: `v_reverse`/`v_shift`/`v_scale` defaults restored (were commented
+  out but still used). `sampled_freeform_triangles.py`: `layers` is optional as
+  documented; `layer_height` must be `> 0`. `filament_mesh.py`: 54 unreachable lines
+  removed. `_get_param` in the porous scripts treats an unconnected (None) input as
+  missing.
+
+Open questions for the maintainer (not changed):
+
+- `kuka.py` ends the main program with a raw `$OUT[3]=FALSE`, which with the inverted
+  extruder logic means "extruder running" — confirm whether this is a deliberate
+  "release the stop signal" or a leftover.
+- `img_projection.py` reads a global `pt` when `srf1` is connected; it must be a
+  component input or the script raises `NameError`.
+- `ultimaker_speeds.py` centres `toolpath` for the bounds check but emits `PTS`
+  untouched; `VEL` is a flow multiplier that assumes 1 mm point spacing.
+- `ultimaker.py` emits `M106` on every point above Z=2 (harmless, bloats the file) and
+  its `flow` input only lands in the header, unlike `wasp_delta.py`.

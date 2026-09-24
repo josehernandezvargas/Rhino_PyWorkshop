@@ -5,7 +5,7 @@ import iolib as io
 
 
 def lerp(a, b, t):
-    """"
+    """
     Creates a linear interpolation between two values
     Returns the value for a parameter t in the range a - b"""
     return((1 - t) * a + b * t)
@@ -37,7 +37,7 @@ def remap(imin, imax, omin, omax, v):
     return(lerp(omin, omax, t))
 
 def lerppts( a , b , t):
-    """"
+    """
     Creates a linear interpolation between two points
     Returns the value for a parameter t in the range a - b"""
     ax, ay, az = a[0], a[1], a[2]

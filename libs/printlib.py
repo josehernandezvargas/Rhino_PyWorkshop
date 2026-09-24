@@ -14,15 +14,15 @@ def selfclosestpt2(pts, i, diam):
         i: index of the point in the list to evaluate
         diam: max distance to ignore expressed in number of points ( = mm when curve is sliced at regular 1 mm distance )
     Output:
-        distance
+        distance, or None when every point lies inside the +-diam index window
     """
 
-    dist = []
     low = max(i-diam, 0)  # some range before and after the point
-    high = min(i+diam, len(pts)-1)
-    list1 = pts[0:low]  # first slice before the point
-    list2 = pts[high:-1]  # second slice after
+    list1 = pts[0:low]  # points more than `diam` indices before i
+    list2 = pts[i+diam+1:]  # points more than `diam` indices after i
     newlist = list1+list2  # new list some points contiguous to the point
+    if not newlist:
+        return None  # every point is within the ignored window
     pt = pts[i]
     closestpt = newlist[rs.PointArrayClosestPoint(newlist, pt)]
     # returns a single distance
@@ -54,7 +54,10 @@ def leveltoplatform(input, height=0):
         Geometry at the specified height
     """
 
-    minx, miny, minz, maxx, maxy, maxz = gl.bbox_bounds(input)
+    bounds = gl.bbox_bounds(input)
+    if not bounds:
+        raise io.ValidationError("leveltoplatform: could not compute a bounding box for the input.")
+    minx, miny, minz, maxx, maxy, maxz = bounds
     disp = height - minz
     vector = rs.CreateVector(0, 0, disp)
     if type(input) is list:
@@ -81,7 +84,10 @@ def centerobject(input, buildplate=(223, 223), delta=False):
         Geometry centred on the platform
     """
 
-    minx, miny, minz, maxx, maxy, maxz = gl.bbox_bounds(input)
+    bounds = gl.bbox_bounds(input)
+    if not bounds:
+        raise io.ValidationError("centerobject: could not compute a bounding box for the input.")
+    minx, miny, minz, maxx, maxy, maxz = bounds
     centrex = (minx + maxx) / 2  # part midpoint in x and y
     centrey = (miny + maxy) / 2
     if delta:
@@ -127,7 +133,6 @@ def materialestimation(length, nozzle, unit=0):
     area = pi * r**2  # in mm2
     vol = area * length  # in mm3
     l = vol/1000000  # vol in litres
-    m = length/1000  # length in metres
     return l
 
 
@@ -195,11 +200,15 @@ def stack_curves_by_pattern(crvA, crvB, pattern="AB", layer_height=1.0, total_he
 
     if not crvA or not crvB:
         raise ValueError("Both crvA and crvB must be valid curve objects.")
-    
+    io.validate_scalar("layer_height", layer_height, min_value=0, allow_zero=False)
+
     curves = []
     z = 0.0
     pattern_index = 0
     pattern = pattern.upper()
+    if not pattern or any(key not in "AB" for key in pattern):
+        # A key that never matches would otherwise loop forever (z never advances).
+        raise ValueError("pattern must be a non-empty string made of 'A' and 'B' only.")
 
     base_curves = {'A': crvA, 'B': crvB}
 

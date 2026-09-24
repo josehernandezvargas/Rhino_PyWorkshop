@@ -439,7 +439,7 @@ def generate_pattern_stack(crvs, srf, img, pattern, target_dist, amp_range, shif
                 f"[layer {i}] division count {segment_divisions} differs from layer 0's "
                 f"{reference_divisions}; division counts should stay constant across the "
                 "stack for consistent layer alignment.",
-                level="warning")
+                level="warning", component=ghenv.Component)
 
         if is_closed and len(combined) > 1 and combined[0][0] == combined[-1][0]:
             combined = combined[:-1]  # drop the seam point duplicated by wrap-around

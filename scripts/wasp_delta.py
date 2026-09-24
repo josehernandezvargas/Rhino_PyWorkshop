@@ -26,13 +26,7 @@ ghenv.Component.Name = "Wasp gcode exporter"
 
 gcode = GCodeLib(filename, 'wasp')
 
-polyline = rs.AddPolyline(PTS)
-
-gcode.get_part_dims(polyline)
-gcode.add_header(nozzle, flow)
-gcode.check_print(reporter=ghenv.Component)
-
-print("0 initialise class / add header: {:.4f} seconds".format(time.time() - start_time))
+print("0 initialise class: {:.4f} seconds".format(time.time() - start_time))
 
 previewpts = []
 previewflow = []
@@ -64,6 +58,12 @@ toolpath = pl.leveltoplatform(toolpath)
 
 # turn back into point list
 PTS = rs.CurvePoints(toolpath)
+
+# header bounds and the build-volume check must use the *centred* geometry;
+# running them on the raw PTS (as before) checked the wrong position
+gcode.get_part_dims(toolpath)
+gcode.add_header(nozzle, flow)
+gcode.check_print(reporter=ghenv.Component)
 
 print("2 PTS to polyline and back: {:.4f} seconds".format(time.time() - start_time))
 
@@ -101,6 +101,7 @@ F1 = 600 # start speed F1200 after 2 mm
 # code generation
 first = True
 ext = 0
+dist = 0.0
 adhesion_layer = 1
 fans_off = True
 
@@ -114,9 +115,9 @@ for i, pt in enumerate(PTS):
         adhesion_layer = 0
         fans_off = False
         F1 = 900
-    # Variable flow by distance
-    varflow = pl.selfclosestpt2(PTS, i, 4) / nozzle
-    # end variable flow
+    # DISABLED: variable flow by distance - the result was never used and the
+    # closest-point search made this loop O(n^2)
+    # varflow = pl.selfclosestpt2(PTS, i, 4) / nozzle
     if i < len(PTS) - 1:  # Ensure there is a next point
         next_pt = PTS[i + 1]
         dist = rs.Distance(pt, next_pt)
@@ -173,7 +174,7 @@ if save:
     # print the filepath and a timestamp with the hour
     print('File Saved ' + file + hourstamp)
 else:
-    msg = "Set 'write' to True."
+    msg = "Set 'save' to True."
     ghenv.Component.AddRuntimeMessage(
         gh.Kernel.GH_RuntimeMessageLevel.Warning, msg)
 

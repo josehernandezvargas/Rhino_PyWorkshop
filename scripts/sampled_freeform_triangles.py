@@ -994,8 +994,10 @@ def _validate_inputs():
     )
 
     img_value = _get_param("img", None)
-    layers_value = _validate_scalar("layers", _get_param("layers", None), errors, minimum=0)
-    layer_height_value = _validate_scalar("layer_height", _get_param("layer_height", None), errors)
+    # `layers` is an optional cap (see docstring); None means "all sliced rows".
+    layers_raw = _get_param("layers", None)
+    layers_value = _validate_scalar("layers", layers_raw, errors, minimum=0) if layers_raw is not None else None
+    layer_height_value = _validate_scalar("layer_height", _get_param("layer_height", None), errors, minimum=0)
     div_dist_value = _validate_scalar("div_dist", _get_param("div_dist", None), errors, minimum=0)
     num_u_value = _validate_scalar("num_u", _get_param("num_u", None), errors, minimum=0)
     num_v_value = _validate_scalar("num_v", _get_param("num_v", None), errors, minimum=0)

@@ -6,14 +6,39 @@ from itertools import cycle
 import geometrylib as gl
 import iolib as io
 import math
+import os
+
+
+# Bitmaps loaded from a file path are cached here so that sampling thousands of
+# points does not re-open (and never dispose) the image once per point.
+# Keyed by absolute path; the entry is refreshed when the file's size or
+# modification time changes.
+_BITMAP_CACHE = {}
 
 
 def _coerce_bitmap(image_source):
-    """Return a Bitmap from a file path or an existing bitmap-like input."""
+    """Return a Bitmap from a file path or an existing bitmap-like input.
+
+    File paths are loaded once and cached (see _BITMAP_CACHE); pass an
+    already-loaded Bitmap to bypass the cache entirely.
+    """
     if isinstance(image_source, Bitmap):
         return image_source
     if hasattr(image_source, "Width") and hasattr(image_source, "Height") and hasattr(image_source, "GetPixel"):
         return image_source
+    if isinstance(image_source, str):
+        key = os.path.abspath(image_source)
+        try:
+            stat = os.stat(key)
+            stamp = (stat.st_mtime, stat.st_size)
+        except OSError:
+            raise io.ValidationError("Image file not found: {}".format(image_source))
+        cached = _BITMAP_CACHE.get(key)
+        if cached is not None and cached[0] == stamp:
+            return cached[1]
+        bitmap = Bitmap(key)
+        _BITMAP_CACHE[key] = (stamp, bitmap)
+        return bitmap
     return Bitmap(image_source)
 
 
@@ -60,7 +85,6 @@ def closest_srf(pt, srf0, srf1):
     srf1_pt = rs.EvaluateSurface(srf1, param1[0] , param1[1])
     d0 = rs.Distance(pt, srf0_pt)
     d1 = rs.Distance(pt, srf1_pt)
-    print('distance: ', d0, d1)
     if d0 >= d1:
         return(srf1, 1)
     else:
@@ -92,17 +116,18 @@ def sample_surface_color(pt, surface, image_path, as_hsl=False):
     img_w = img.Width
     img_h = img.Height
 
-    # Map U to pixel X and V to pixel Y (flip V because image origin is top-left)
-    px = int(round(gl.remap(u_dom[0], u_dom[1], 0, img_w - 1, u)))
-    py = int(round(gl.remap(v_dom[0], v_dom[1], img_h - 1, 0, v)))
+    # Map U to pixel X and V to pixel Y (flip V because image origin is top-left).
+    # Clamp so rounding at the domain edges can never index outside the image.
+    px = gl.minmaxcap(0, img_w - 1, int(round(gl.remap(u_dom[0], u_dom[1], 0, img_w - 1, u))))
+    py = gl.minmaxcap(0, img_h - 1, int(round(gl.remap(v_dom[0], v_dom[1], img_h - 1, 0, v))))
 
     # Sample pixel color
     color = img.GetPixel(px, py)
 
     if as_hsl:
-        # Rhino's ColorRGBToHLS returns (H, L, S)
-        h, l, s = rs.ColorRGBToHLS(color)
-        # Return as (H, S, L)
+        # Despite its name, rhinoscriptsyntax.ColorRGBToHLS returns (H, S, L)
+        # (see rhinoscript/utility.py: `return hsl.H, hsl.S, hsl.L`).
+        h, s, l = rs.ColorRGBToHLS(color)
         return h, s, l
     else:
         # Return (R, G, B)
@@ -141,6 +166,12 @@ def remap_rgb_channels(rgb, channel_ranges):
     return param1, param2, param3
 
 def get_division_parameters(crv, srf, img, param_config):
+    """Walk along crv in steps given by param_config['dist'], sampling amp/shift.
+
+    param_config maps 'dist', 'amp' and 'shift' to (mode, settings) pairs
+    understood by evaluate_parameter. 'dist' is consumed as a curve-parameter
+    increment and must evaluate to a positive number.
+    """
     div_data = []
     domain = rs.CurveDomain(crv)
 
@@ -152,6 +183,10 @@ def get_division_parameters(crv, srf, img, param_config):
         dist = evaluate_parameter(*param_config['dist'], pt, rgb)
         amp  = evaluate_parameter(*param_config['amp'], pt, rgb)
         shift= evaluate_parameter(*param_config['shift'], pt, rgb)
+        if not dist or dist <= 0:
+            raise io.ValidationError(
+                "param_config['dist'] evaluated to {} at t={}; it must be > 0 "
+                "or the division loop never terminates.".format(dist, t))
         div_data.append((pt, amp, shift))
         t += dist
     # Safety: ensure end of curve is included
@@ -242,24 +277,20 @@ def evaluate_parameter(mode, settings, pt, rgb):
     elif mode == 'gradient':
         coord = pt[settings['axis']]
         t = gl.invlerp(*settings['domain'], coord)
-        if settings['mode'] == 'linear':
-            factor = t
-        elif settings['mode'] == 'peak':
-            factor = 2 * t if t <= 0.5 else 2 * (1 - t)
-        elif settings['mode'] == 'valley':
-            factor = 1 - (2 * t if t <= 0.5 else 2 * (1 - t))
-        elif settings['mode'] == 'smoothpeak':
-            factor = abs(math.sin(t * math.pi))
-        elif settings['mode'] == 'smoothvalley':
-            factor = 1 - abs(math.sin(t * math.pi))
-        else:
-            raise ValueError("Unknown gradient mode")
+        factor = _gradient_factor(settings.get('mode', 'linear'), t)
         return gl.lerp(*settings['range'], factor)
     else:
         raise ValueError("Unknown source mode")
 
+GRADIENT_MODES = ('linear', 'reverse', 'peak', 'valley', 'smoothpeak', 'smoothvalley')
+
+
 def _gradient_factor(mode, t):
-    """Return a normalized gradient factor for linear/reverse/peak/valley modes."""
+    """Return a normalized gradient factor (0-1) for a parameter t (0-1).
+
+    Single source of truth for the gradient shapes used by evaluate_parameter,
+    build_gradient_pattern and build_stack_pattern. Modes: see GRADIENT_MODES.
+    """
     if mode == 'linear':
         return t
     if mode == 'reverse':
@@ -268,13 +299,18 @@ def _gradient_factor(mode, t):
         return 2 * t if t <= 0.5 else 2 * (1 - t)
     if mode == 'valley':
         return 1 - (2 * t if t <= 0.5 else 2 * (1 - t))
-    raise ValueError("Invalid gradient mode.")
+    if mode == 'smoothpeak':
+        return abs(math.sin(t * math.pi))
+    if mode == 'smoothvalley':
+        return 1 - abs(math.sin(t * math.pi))
+    raise ValueError("Invalid gradient mode '{}'. Expected one of {}.".format(mode, GRADIENT_MODES))
 
 
 def build_gradient_pattern(crvs, mode='linear', min_val=0.0, max_val=1.0):
     """
     Build deterministic boolean pattern with flexible gradients.
-    Modes: 'linear', 'reverse', 'peak', 'valley'
+    Modes: any entry of GRADIENT_MODES ('linear', 'reverse', 'peak', 'valley',
+    'smoothpeak', 'smoothvalley').
     """
     N = len(crvs)
     if N <= 1: # Prevents division by zero
@@ -307,14 +343,5 @@ def build_stack_pattern(crvs, mode='gradient', sequence=None, gradient_mode='lin
         seq_length = len(sequence)
         return [bool(sequence[i % seq_length]) for i in range(N)]
 
-    pattern = []
-    for i in range(N):
-        t = i / (N - 1)
-        value = _gradient_factor(gradient_mode, t)
-        if value < min_val:
-            pattern.append(False)
-        elif value > max_val:
-            pattern.append(True)
-        else:
-            pattern.append(i % 2 == 1)
-    return pattern
+    # 'gradient' mode is exactly build_gradient_pattern; keep one implementation.
+    return build_gradient_pattern(crvs, gradient_mode, min_val, max_val)

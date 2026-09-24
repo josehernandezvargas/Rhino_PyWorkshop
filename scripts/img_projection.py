@@ -1,13 +1,24 @@
 #! python3
 
-"""Applies variable width printing to a series of curves
+"""Applies variable width printing to a series of points
 Projecting from a reference surface
     Inputs:
-        pts:        list of points
-        srf:        surface
-        image_path: path of the projected file
-    Output:
-        speeds:     list of float
+        pts:         list of points
+        srf0:        reference surface (required)
+        srf1:        optional second surface. When connected, the surface
+                     closest to `pt` is used for sampling.
+        pt:          reference point used to choose between srf0 and srf1
+                     (only read when srf1 is connected - must be a component
+                     input, otherwise the script raises NameError)
+        image_path0: path of the image projected on srf0
+        image_path1: path of the image projected on srf1
+        porous:      bool - apply a sinusoidal zigzag displacement instead of a
+                     plain displacement along the surface normal
+    Outputs:
+        a: displaced points
+        b: speeds (mm/s) sampled from the image luminance
+        c: speeds remapped for the robot
+        d: flow multipliers remapped for the Ultimaker
 
 """
 
@@ -113,7 +124,9 @@ for i, pt in enumerate(pts[:10000]):
 #            disp = 0
     # Replace this vector from the curve with the normal from the surface
     # dispvect = rs.CurvePerpFrame(crv,ptparam).XAxis * disp
-    dispvect = rs.SurfaceNormal(srf,[paramx, paramy]) * disp
+    # evaluate the normal at the surface UV parameter (paramx/paramy are image
+    # pixel coordinates, not surface parameters)
+    dispvect = rs.SurfaceNormal(srf, srfparam) * disp
     disppt = rs.CopyObject(rs.AddPoint(pt), dispvect)
     # print("5 porosity: {:.4f} seconds".format(time.time() - t2))
     # t4 = time.time()

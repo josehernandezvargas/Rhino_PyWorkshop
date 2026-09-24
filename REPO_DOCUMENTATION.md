@@ -1,7 +1,7 @@
 # Rhino_PyWorkshop: Repository Documentation for Academic Reporting
 
 ## 1. Repository Purpose
-`Rhino_PyWorkshop` is a Python-based digital design and fabrication toolchain built for Rhino/Grasshopper environments. It connects:
+`Rhino_PyWorkshop` is a Python-based digital design and fabrication toolchain built for Rhino 8 / Grasshopper (CPython 3 script components). It connects:
 - geometric design generation,
 - computational pattern control,
 - toolpath preparation,
@@ -41,14 +41,14 @@ These features position the repository as a practical digital fabrication tool, 
 ### 3.1 Core Libraries (`libs/`)
 - `geometrylib.py`: interpolation, remapping, normalization, orientation conversion, input validation.
 - `curvelib.py`: curve operations, self-intersection logic, division, offset and spiral utilities.
-- `printlib.py`: print-path preparation, G-code line formatting, slicing and stacking helpers.
-- `gcodelib.py`: machine-aware G-code object with headers, comments and bounds extraction.
-- `kukalib.py`: KUKA KRL program builder with safety-oriented motion parameter checks.
-- `srflib.py`: image/surface sampling and data-driven pattern construction.
-- `iolib.py`: CSV/XLSX data IO for pipeline integration and reporting workflows.
+- `printlib.py`: print-path preparation (centring, levelling), uniform Brep slicing, pattern-based curve stacking and material estimation.
+- `gcodelib.py`: machine profiles (cartesian and delta build volumes), the canonical flow formula, G-code line/header/file helpers and a stateful `GCodeLib` export class.
+- `kukalib.py`: KUKA KRL program builder (header, PTP/LIN moves, outputs, local subprograms) with safety-oriented speed caps and safe file naming.
+- `srflib.py`: image/surface sampling with cached bitmaps, gradient profiles and data-driven pattern construction.
+- `iolib.py`: CSV/XLSX data IO plus the shared input-validation helpers used by every other library.
 
 ### 3.2 Applied Scripts (`scripts/`)
-- Pattern generation: `thermal_patterns.py`, `e3d_wall_test.py`, `porous_*`, `sampled_porous_pattern.py`.
+- Pattern generation: `thermal_patterns.py`, `e3d_wall.py`/`e3d_wall_test.py`, `porous_*`, `sampled_porous_pattern.py`, `biofab_porous_pattern.py`, `sampled_triangles*.py`, `sampled_freeform_triangles.py`.
 - Geometry transformation: `spiraliser.py`, `filament_mesh.py`, `adaptive_slicing.py`.
 - Export workflows: `ultimaker.py`, `ultimaker_speeds.py`, `wasp_delta.py`, `generic_gcode.py`, `kuka.py`.
 - Image-driven modulation: `img_projection.py`, porous sampling workflows.

@@ -94,6 +94,7 @@ class KukaKRL:
 
     def set_velocity(self, velocity: float):
         """Set the LIN velocity in m/s. Hard-capped at MAX_LIN_VELOCITY_MPS for safety."""
+        velocity = io.validate_scalar("LIN velocity", velocity, min_value=0, allow_zero=False)
         if velocity > self.MAX_LIN_VELOCITY_MPS:
             warnings.warn(
                 f"LIN velocity {velocity} m/s exceeds the hardcoded "
@@ -261,16 +262,18 @@ class KukaKRL:
         self._emit(f"WAIT FOR $IN[{input_number}]=={'TRUE' if state else 'FALSE'}")
 
     def ptp(self, position: tuple, e1: float = 0, e2: float = 0):
-        """Point-to-point motion to a specified position with optional external axes."""
+        """Point-to-point motion to a joint position (A1..A6 axis angles in degrees),
+        with optional external axes E1/E2."""
         if len(position) != 6:
-            raise ValueError("Position must be a tuple with 6 values (X, Y, Z, A, B, C).")
+            raise ValueError("Position must be a tuple with 6 axis angles (A1, A2, A3, A4, A5, A6).")
         a1, a2, a3, a4, a5, a6 = position
         self._emit(
             f"PTP {{A1 {a1}, A2 {a2}, A3 {a3}, A4 {a4}, A5 {a5}, A6 {a6}, E1 {e1}, E2 {e2}, E3 0, E4 0, E5 0, E6 0}}"
         )
 
     def lin(self, position: tuple, approx: str = "C_DIS"):
-        """Linear motion to a specified position with optional external axes.
+        """Linear motion to a Cartesian position (X, Y, Z in mm, A, B, C in degrees).
+        External axes E1/E2 are always written as 0.
 
         approx is the approximation suffix; pass None/"" for exact positioning
         (required, for instance, on the first motion after a RESUME).
@@ -322,7 +325,13 @@ class KukaKRL:
         return truncated_path, base_name
 
     def write_file(self, filename):
+        """Write the program to filename (.src).
 
+        KRC controllers require the ``DEF <name>`` inside the file to match the
+        file name, so when the file name has to be truncated to 24 characters
+        the DEF line is rewritten to the truncated name as well and the full
+        name is kept as a comment.
+        """
         if len(os.path.basename(filename)) > 24:
             truncated_filename, _original_filename = self._truncate_filename(filename)
             self.add_comment(f"FULLNAME: {filename}")
@@ -332,6 +341,11 @@ class KukaKRL:
         # full_program() closes the main program with END and appends any local
         # subprograms after it.
         lines = self.full_program()
+
+        truncated_name = os.path.splitext(os.path.basename(truncated_filename))[0]
+        def_line = f"DEF {self.name} ( )"
+        if truncated_name != str(self.name) and def_line in lines:
+            lines[lines.index(def_line)] = f"DEF {truncated_name} ( )"
 
         # Write each line of the KUKA src program to the specified file
         with open(truncated_filename, "w") as fileOut:

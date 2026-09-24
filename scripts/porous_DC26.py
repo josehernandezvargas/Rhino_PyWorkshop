@@ -54,7 +54,10 @@ step_count = int(steps)
 nozzle = 20.0
 
 def _get_param(name, default):
-    return globals().get(name, default)
+    # An unconnected Grasshopper input exists as a global set to None; treat
+    # that the same as a missing input so the default applies.
+    value = globals().get(name, None)
+    return default if value is None else value
 
 
 def _optional_width(value):
@@ -70,11 +73,11 @@ def _optional_width(value):
 u_bias = float(_get_param("u_bias", 1.0))
 # v_bias = float(_get_param("v_bias", 1.5))
 u_reverse = bool(_get_param("u_reverse", False))
-# v_reverse = bool(_get_param("v_reverse", False))
+v_reverse = bool(_get_param("v_reverse", False))
 u_shift = float(_get_param("u_shift", 0.0))
-# v_shift = float(_get_param("v_shift", 0.0))
+v_shift = float(_get_param("v_shift", 0.0))
 u_scale = float(_get_param("u_scale", 1.0))
-# v_scale = float(_get_param("v_scale", 1.0))
+v_scale = float(_get_param("v_scale", 1.0))
 width_front_input = _optional_width(_get_param("width_front", None))
 width_back_input = _optional_width(_get_param("width_back", None))
 width_back_reduction = float(_get_param("width_back_reduction", 0.0))

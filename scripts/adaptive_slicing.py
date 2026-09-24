@@ -2,15 +2,22 @@
 """Adaptive layer height
 
 Inputs:
-    brep
-    samples
-    layer_height
+    brep: Brep to slice.
+    samples: number of measurement contours used to estimate the overhang angle (int).
+    crv_samples: points sampled on each contour when measuring the overhang angle (int).
+    layer_height: currently unused - the target layer height is derived from the
+        measured overhang angle and clamped to the 5-10 mm range.
+
+Outputs:
+    a: adaptive slice heights (Z values, starting at 0).
+    b: layer height between consecutive slices.
 """
 
 __author__ = "joseh"
 __version__ = "2024.08.14"
 
 import rhinoscriptsyntax as rs
+import Grasshopper as gh
 import math
 from ghpythonlib import treehelpers as th
 

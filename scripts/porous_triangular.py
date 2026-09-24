@@ -59,7 +59,10 @@ num_v = int(num_v)
 step_count = int(steps)
 
 def _get_param(name, default):
-    return globals().get(name, default)
+    # An unconnected Grasshopper input exists as a global set to None; treat
+    # that the same as a missing input so the default applies.
+    value = globals().get(name, None)
+    return default if value is None else value
 
 u_bias = float(_get_param("u_bias", 1.0))
 # v_bias = float(_get_param("v_bias", 1.5))

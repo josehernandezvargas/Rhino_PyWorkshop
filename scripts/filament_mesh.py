@@ -109,60 +109,6 @@ def create_rounded_rectangle(width, height, subdivs):
     pts.append(pts[0])
     return rg.Polyline(pts)
 
-    # filleted rectangle
-    radius = min(half_w, half_h)
-    # corner centers and their arc angles
-    corner_data = [
-        ( half_w - radius,  half_h - radius,  0.0,      math.pi/2),
-        ( half_w - radius, -half_h + radius, -math.pi/2, 0.0),
-        (-half_w + radius, -half_h + radius, math.pi,   -math.pi/2),
-        (-half_w + radius,  half_h - radius, math.pi/2,  math.pi)
-    ]
-    for cx, cy, a0, a1 in corner_data:
-        # sample the arc between a0 and a1
-        for i in range(subdivs + 1):
-            t = i / float(subdivs)
-            ang = a0 + (a1 - a0) * t
-            x = cx + math.cos(ang) * radius
-            y = cy + math.sin(ang) * radius
-            pts.append(rg.Point3d(x, y, 0))
-    pts.append(pts[0])
-    return rg.Polyline(pts)
-    # filleted rectangle
-    radius = min(half_w, half_h)
-    # define corner centers and start/end angles for arcs
-    corner_data = [
-        # center_x, center_y, start_angle, end_angle
-        ( half_w - radius,  half_h - radius,  0.0,      math.pi/2),
-        ( half_w - radius, -half_h + radius, -math.pi/2, 0.0),
-        (-half_w + radius, -half_h + radius, math.pi,   -math.pi/2),
-        (-half_w + radius,  half_h - radius, math.pi/2,  math.pi)
-    ]
-    for cx, cy, a0, a1 in corner_data:
-        for i in range(subdivs + 1):
-            t = i / subdivs
-            ang = a0 + (a1 - a0) * t
-            x = cx + math.cos(ang) * radius
-            y = cy + math.sin(ang) * radius
-            pts.append(rg.Point3d(x, y, 0))
-    pts.append(pts[0])
-    return rg.Polyline(pts)
-    radius = min(half_w, half_h)
-    # generate fillet arcs and straight segments
-    corners = [(half_w - radius,  half_h - radius,  0.0, 0.0),
-               ( half_w - radius, -half_h + radius,  0.0, -1.0),
-               (-half_w + radius, -half_h + radius, -1.0,  0.0),
-               (-half_w + radius,  half_h - radius,  0.0,  1.0)]
-    for cx, cy, dx, dy in corners:
-        # center of fillet arc
-        for i in range(subdivs + 1):
-            angle = math.atan2(dy, dx) + (math.pi/2) * (i / subdivs)
-            x = cx + math.cos(angle) * radius
-            y = cy + math.sin(angle) * radius
-            pts.append(rg.Point3d(x, y, 0))
-    pts.append(pts[0])
-    return rg.Polyline(pts)
-
 
 def sample_frames(crv, tol):
     """Divide curve by length/tolerance and return list of perpendicular frames."""

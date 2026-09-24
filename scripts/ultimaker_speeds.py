@@ -2,6 +2,17 @@
 
 """Grasshopper Script
 Exports gcode for Ultimaker taking a list of points and a list of velocities as an input
+
+Inputs:
+    PTS: list of points in print order. The points are emitted exactly as
+         given - only `toolpath` is centred/levelled (for the header bounds and
+         the build-volume check), so PTS must already sit inside the build
+         volume at the same position as toolpath.
+    VEL: list of per-point flow multipliers, same length as PTS. Each value is
+         added to the cumulative E as VEL[i] * materialflow with no distance
+         term, i.e. it assumes a constant 1 mm point spacing.
+    toolpath: curve(s) used only for the header bounds and build-volume check.
+    nozzle, layerheight, flow, filename, save: as in ultimaker.py.
 """
 
 __author__ = "jose hernandez vargas"
@@ -132,6 +143,6 @@ if save:
     # print the filepath and a timestamp with the hour
     print('File Saved  ' + file + hourstamp)
 else:
-    msg = "Set 'write' to True."
+    msg = "Set 'save' to True."
     ghenv.Component.AddRuntimeMessage(
         gh.Kernel.GH_RuntimeMessageLevel.Warning, msg)

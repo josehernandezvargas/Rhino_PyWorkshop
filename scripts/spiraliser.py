@@ -5,9 +5,11 @@
 Converts a list of planar polylines into a continuous spiral
     Inputs:
         crvs: list of polylines (their existing control points are used directly)
-        delta: layer height (mm) used for the last curve in the stack, where it
-            can't be derived from the next curve's plane; optional, defaults to
-            10 mm with a warning if not supplied
+        delta: layer height (mm). Only used when a single curve is supplied:
+            with two or more curves the rise of every curve is taken from the
+            plane-height difference between consecutive curves, and the last
+            curve reuses the previous pair's difference. Optional, defaults to
+            10 mm with a warning if not supplied.
         fade_out: if True, repeats the last curve once more at the spiral's
             final height (a level loop, no further rise) after the spiral ends,
             so the path closes back on the same point where the spiral ended.
@@ -118,8 +120,8 @@ for i, crv in enumerate(crvs):
     spiral = spiralise( points , delta, normal)
 
 
-    for i, pt in enumerate(points):
-        newpt = gl.lerppts( spiral[i], points[i], t)
+    for j in range(len(points)):  # `j`, not `i`: the outer loop index is reused below
+        newpt = gl.lerppts( spiral[j], points[j], t)
         damped.append(newpt)
     dampedpts.append(damped)
     spiralpts.append(spiral)

@@ -18,8 +18,8 @@ def midpt(pt0, pt1):
 
 
 def divcrvlen(crv, dist):
-    len = rs.CurveLength(crv)
-    divlen = round(len / dist)
+    length = rs.CurveLength(crv)
+    divlen = max(1, int(round(length / dist)))  # at least one segment
     curve = rs.DivideCurve(crv, divlen)
     return(curve)
 
@@ -345,18 +345,31 @@ def offset_crv_both_sides(crv, offset_distance, style=1, cap_style=1):
         2 = Round
         3 = Smooth
         4 = Chamfer
-        cap_style: Cap style for open curves (int), default is 0 = flat.
+        cap_style: Cap style for open curves (int), default is 1 = round.
         0 = Flat
         1 = Round
         2 = Square
     Returns:
-        A tuple containing the two offset curves (left, right) or None if offset fails.
+        Open curves: the joined outline (list of curve GUIDs from rs.JoinCurves).
+        Closed curves: [left_offset, right_offset] - no caps are added.
+        None if the offset fails on either side.
+
+    Raises:
+        iolib.ValidationError: if cap_style is not 0, 1 or 2.
     """
+    if cap_style not in (0, 1, 2):
+        raise io.ValidationError("cap_style must be 0 (flat), 1 (round) or 2 (square).")
+
     left_offset = rs.OffsetCurve(crv, (0,0,1), offset_distance, style=style)
     right_offset = rs.OffsetCurve(crv, (0,0,1), -offset_distance, style=style)
 
+    # Check the offsets *before* building caps from their end points.
+    if not left_offset or not right_offset:
+        print("Offset failed on one or both sides.")
+        return None
+
     if rs.IsCurveClosed(crv):
-        cap_style = 0  # no caps for closed curves
+        return [left_offset, right_offset]  # no caps for closed curves
 
     if cap_style == 0:  # flat cap
         start_cap = rs.AddLine(rs.CurveStartPoint(left_offset), rs.CurveStartPoint(right_offset))
@@ -375,9 +388,5 @@ def offset_crv_both_sides(crv, offset_distance, style=1, cap_style=1):
         cap_line_end = rs.CopyObject(rs.AddLine(rs.CurveEndPoint(left_offset), rs.CurveEndPoint(right_offset)), rs.VectorUnitize(end_tangent)*offset_distance)
         start_cap = rs.AddPolyline([rs.CurveStartPoint(left_offset), rs.CurveStartPoint(cap_line_start), rs.CurveEndPoint(cap_line_start), rs.CurveStartPoint(right_offset)])
         end_cap = rs.AddPolyline([rs.CurveEndPoint(left_offset), rs.CurveStartPoint(cap_line_end), rs.CurveEndPoint(cap_line_end), rs.CurveEndPoint(right_offset)])
-    
-    if left_offset and right_offset:
-        return (rs.JoinCurves([left_offset, end_cap, right_offset, start_cap]))
-    else:
-        print("Offset failed on one or both sides.")
-        return None
+
+    return (rs.JoinCurves([left_offset, end_cap, right_offset, start_cap]))

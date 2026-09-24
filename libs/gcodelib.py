@@ -25,6 +25,8 @@ def load_machine_properties(machine_file):
     machine id (e.g. "ultimaker2"), in which case it is resolved against the
     repo's machine_settings/ folder.
     """
+    if not isinstance(machine_file, str) or not machine_file.strip():
+        raise io.ValidationError("machine_file must be a machine id or a path to a .json file.")
     if not machine_file.lower().endswith(".json"):
         current_dir = os.path.dirname(os.path.abspath(__file__))
         parent_dir = os.path.dirname(current_dir)
@@ -54,12 +56,17 @@ def is_within_build_volume(profile, x, y, z):
 
 
 def calculate_flow(nozzle, layerheight, filament):
-    """Canonical FFF/FDM extrusion flow multiplier.
+    """Canonical FFF/FDM extrusion flow multiplier (E units per mm of travel).
+
+    (nozzle * layerheight) / filament_area is the length of filament needed
+    per mm of printed track. The trailing ``* 10`` is the calibration factor
+    the Ultimaker 2 (UltiGCode) scripts have always used; wasp_delta.py
+    divides the result by 10 again to get plain filament-mm for Marlin. Keep
+    this factor as is - changing it changes the physical extrusion amount.
 
     The single source of truth for the formula previously duplicated (with a
     typo in one copy) across printlib.py and several ultimaker scripts.
     """
-    narea = ((nozzle / 2) ** 2) * math.pi  # nozzle area
     filarea = ((filament / 2) ** 2) * math.pi  # filament area
     return (nozzle * layerheight) / filarea * 10
 
@@ -265,7 +272,7 @@ class GCodeLib:
         Validate the part against the machine's build volume, reporting any
         issues via `reporter` (a GH component) if given, else printing them.
         """
-        if self.part is None:
+        if self.part is None or self.maxz is None:
             raise io.ValidationError(
                 "Part dimensions not set. Please run get_part_dims() before checking the print."
             )
@@ -304,7 +311,7 @@ class GCodeLib:
 
     def add_header(self, nozzle, flow):
         """Build and store the comment header for the current part."""
-        if self.part is None:
+        if self.part is None or self.maxz is None:
             raise io.ValidationError(
                 "Part dimensions not set. Please run get_part_dims() before adding a header."
             )
