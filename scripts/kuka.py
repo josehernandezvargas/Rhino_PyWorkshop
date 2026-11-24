@@ -1031,7 +1031,8 @@ krl.code[material_comment_index:material_comment_index] = material_comment_lines
 
 
 if save:
-    krl.write_file(file)
+    # write_file returns the path it actually wrote (the name may be cleaned / cut to 24 characters)
+    file = krl.write_file(file)
 
     # print the filepath and a timestamp with the hour
     print('File Saved  ' + file + hourstamp)

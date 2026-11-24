@@ -185,7 +185,7 @@ unless specifically asked to.
 | `curvelib.py` | Curve construction/measurement helpers: `centercrv`/`centercrv_dir`, `divide_crv_equal`, `bboxplanedomain`, `curveselfintersection`/`curveselfintersection2`, `sort_curves_z`, `spiralise`, `rounded_rectangle`, `offset_crv_both_sides`, etc. Imports `geometrylib`, `iolib`. | Yes |
 | `printlib.py` | Print-path prep: `centerobject`, `leveltoplatform`, `selfclosestpt2`, `slice_brep_uniform` (older `rs.AddSrfContourCrvs`-based slicer, currently unused by any script), `stack_curves_by_pattern`, `materialestimation` (FFF/3DCP volume-from-length estimate). `gcodeline` here is a **thin re-export of `gcodelib.gcodeline`** — kept only because `ultimaker_standalone.py` still calls `pl.gcodeline`. Imports `curvelib`, `geometrylib`, `gcodelib`, `iolib`. | Yes |
 | `gcodelib.py` | The shared, machine-agnostic G-code module (rebuilt — see §4). Machine-profile abstraction (`load_machine_properties`, `is_within_build_volume` — supports both rectangular `x/y/z` and radial/delta `r/h` build volumes), `calculate_flow` (canonical formula), `gcodeline`/`travel_move`/`print_move`/`retract`/`unretract`, `purge_duplicate_points`/`purge_collinear_points`/`center_points_to_origin`, `curve_to_polyline_points`/`curve_to_points`, `build_header`, `save_gcode_file`, and a `GCodeLib` class wrapping the stateful per-run workflow (`get_part_dims`, `check_print`, `add_header`, `save`). Imports `geometrylib`, `iolib`. | Yes |
-| `kukalib.py` | `KukaKRL` class: KRL program assembly (`krl_header`, `ptp`, `lin`, `set_output`, `wait`, fold/comment helpers), tool/base/velocity validation (delegates to `iolib.validate_scalar`), safe filename truncation on write (`write_file`). Imports `iolib`. | No (pure string assembly + file I/O — could in principle be tested headless, but isn't yet wired that way) |
+| `kukalib.py` | `KukaKRL` class: KRL program assembly (`krl_header`; motions `ptp`, `ptp_pose` (Cartesian, S/T), `ptp_rel`, `lin`, `lin_rel` (#BASE/#TOOL, rotations), `circ`/`circ_rel` (CA), a `start_spline`/`spl`/`slin`/`scirc`/`end_spline` block; settings `set_velocity`, `set_acceleration`, `set_approximation`, `set_orientation_mode`, `set_ptp_velocity`/`set_ptp_acceleration`; `set_output`, `wait`, fold/comment helpers), tool/base/velocity validation (delegates to `iolib.validate_scalar`), safe filename truncation on write (`write_file`). Module functions `pose`/`poses`/`arc_poses` turn Rhino planes, points and arcs (duck-typed, ids via a lazy `rhinoscriptsyntax` import) into the `(X, Y, Z, A, B, C)` tuples the motions take; `abc_from_axes`/`axes_from_abc` are the KUKA ZYX angle maths. Imports `iolib`. | No (pure string assembly + file I/O; importable and tested headless with stand-in Rhino objects) |
 | `srflib.py` | Image/surface sampling and pattern generation: `sample_surface_color`, `closest_srf`, `remap_rgb_channels`, `evaluate_parameter` (fixed/image/gradient sourcing — see §5 for a **known gap**), `get_division_parameters`, `build_alternating_polylines`, `generate_pattern_stack`, `build_gradient_pattern`/`build_stack_pattern` (share a private `_gradient_factor` helper). Imports `geometrylib`, `iolib`. | Yes |
 
 `libs/__init__.py` only re-exports `iolib`'s public names (CSV/XLSX + validation) —
@@ -431,6 +431,20 @@ Fixed (headless-verified where possible, all still need a GH re-run):
   removed. `_get_param` in the porous scripts treats an unconnected (None) input as
   missing.
 
+### 2026-11-19 — kukalib critical fixes
+
+Headless-verified against the previous commit: a valid program is byte-identical. Changes only
+affect input that used to produce a program the controller rejects.
+
+- `krl_name()`: program and file names are cleaned to a valid KRL name (ASCII letters, digits,
+  `_`, no leading digit, at most 24 characters). `write_file` always sets the DEF line to the file
+  name it actually writes, keeps the original name as `;FULLNAME:` right after DEF, no longer
+  appends to `self.code`, and returns the written path (`kuka.py` prints that path).
+- Tool and base numbers must be whole numbers and are written as INT (`6.0` gave `TOOL_NO 6.0`).
+- `$VEL.CP` and `WAIT SEC` use plain decimals (`_krl_real`); `str()` gave `5e-05`.
+- `set_output`/`wait_for_input` validate the I/O number; `wait` rejects negative times;
+  `krl_header` refuses a second call; invalid local subprogram names raise.
+
 Open questions for the maintainer (not changed):
 
 - `kuka.py` ends the main program with a raw `$OUT[3]=FALSE`, which with the inverted
@@ -442,3 +456,28 @@ Open questions for the maintainer (not changed):
   untouched; `VEL` is a flow multiplier that assumes 1 mm point spacing.
 - `ultimaker.py` emits `M106` on every point above Z=2 (harmless, bloats the file) and
   its `flow` input only lands in the header, unlike `wasp_delta.py`.
+
+### 2026-11-19 — kukalib motions and Rhino conversion
+
+New in `kukalib.py` (existing calls give byte-identical programs; headless-checked against the
+previous version, not yet run on a controller):
+
+- Motions: `circ`/`circ_rel` (auxiliary point written as X, Y, Z only, optional `ca`),
+  `ptp_pose` (Cartesian PTP with Status/Turn), `ptp_rel`, `lin_rel` rotations and `#TOOL`, a SPLINE
+  block (`start_spline` ... `end_spline`; KR C4 / KSS 8.x only, other statements refused inside it),
+  and `approx="C_PTP"` on `ptp`. Approximation suffixes are validated per motion type.
+- Settings: `set_acceleration` ($ACC.CP), `set_approximation` ($APO.CDIS/CVEL/CORI/CPTP),
+  `set_orientation_mode` ($ORI_TYPE/$CIRC_TYPE), `set_ptp_velocity` (same 10 % / 25 % caps as the
+  header), `set_ptp_acceleration`. `XYZ_DECIMALS`/`ABC_DECIMALS` set target precision (1 / 2).
+- `pose(item, orientation, flip, scale)`: plane axes map to tool axes, so WorldXY = A 0 B 0 C 0
+  (what `kuka.py` writes); `flip=True` turns 180 degrees about X (WorldXY -> C 180). Same ZYX
+  convention as kr16cell's pendant-verified `xyzabc_from_frame` (checked on 500 random frames).
+  `geometrylib.plane_to_abc` is an older, unused variant with ad-hoc angle ranges; prefer `pose`.
+- Joint values in `ptp`/`krl_header` that `str()` would write in exponent notation are written as
+  plain decimals; every other value is written exactly as before.
+- Motion targets must be 6 finite numbers (NaN and bools are refused). Rhino objects go through
+  `pose()` first.
+
+A generated program with every new motion passes kr16cell's KRL lint and simulates there
+(`kr16cam.load`), with SPL segments drawn as straight lines. Needs a controller check: CIRC with
+`CA`, `PTP` with `S`/`T`, `$ORI_TYPE`/`$CIRC_TYPE`, and the SPLINE block with `ENDSPLINE C_SPL`.
