@@ -225,3 +225,160 @@ def stack_curves_by_pattern(crvA, crvB, pattern="AB", layer_height=1.0, total_he
         pattern_index += 1
 
     return curves
+
+# ---------------------------------------------------------------------------
+# Bead footprint (Rhino adapter for beadlib)
+# ---------------------------------------------------------------------------
+
+def bead_footprint(curves, bead_width=None, corner_style="round", end_cap="round",
+                   corner_blend=20.0, corner_bulge=0.25, corner_mitre=2.0, fuse_gap=0.0,
+                   union=True, tolerance=0.1, plane=None, machine=None, with_islands=False,
+                   component=None):
+    """
+    Planar surfaces of the printed filament for the toolpath curves of one layer.
+
+    The geometry is computed by beadlib (disc sweep of the whole polyline, so
+    self-intersecting offsets and corner artefacts cannot occur); this function
+    converts Rhino curves to 2D points in the layer plane and the resulting
+    regions back to planar Breps.
+
+    Parameters
+    ----------
+    curves: list
+        toolpath centrelines (GUIDs or Rhino.Geometry.Curve), all in one plane.
+        Polylines keep their exact vertices; other curves are discretised
+        within `tolerance`.
+    bead_width: float or list, optional
+        one value, or one per curve. When None, the profile's "bead_width"
+        is used (see `machine`).
+    corner_style: str
+        beadlib corner type: round | mitre | bevel | blend | bulge, or any
+        type registered with beadlib.register_corner.
+    end_cap: str
+        end of open curves: round | flat | square.
+    corner_blend: float
+        fillet radius of the centreline for corner_style "blend".
+    corner_bulge: float
+        extra width at a 180 deg turn, as a fraction of bead_width ("bulge").
+    corner_mitre: float
+        mitre limit as a multiple of bead_width/2 ("mitre").
+    fuse_gap: float
+        beads closer than this are fused into one region (0 = off).
+    union: bool
+        True: merged regions in one branch. False: one branch per curve.
+    tolerance: float
+        curve discretisation and arc accuracy.
+    plane: Rhino.Geometry.Plane, optional
+        layer plane. Default: world XY at the height of the first curve.
+    machine: str, optional
+        machine id or .json path (gcodelib.load_machine_properties), used
+        only to read "bead_width" when `bead_width` is None.
+    with_islands: bool
+        also build the islands: planar surfaces of the regions enclosed by
+        the bead (the holes of the footprint), cut where another bead lies
+        inside them.
+    component: optional
+        ghenv.Component, for warnings via iolib.report_issue.
+
+    Returns
+    -------
+    tuple (surfaces, outlines, areas, islands, options)
+        surfaces, outlines, areas and islands are lists of branches (lists):
+        planar Breps, closed boundary curves (outer and holes), region areas
+        and island Breps (empty branches unless with_islands). options is the
+        beadlib.BeadOptions that was used.
+
+    Requires shapely >= 2.0 in Rhino's Python (line '# r: shapely>=2.0' in the
+    calling script). beadlib is imported here, not at module level, so other
+    printlib functions keep working where shapely is not installed.
+    """
+    import Rhino
+    import Rhino.Geometry as rg
+    import System
+    import beadlib as bl
+
+    curves = [rs.coercecurve(c, -1, True) for c in io.require_nonempty_list("curves", curves) if c is not None]
+    if not curves:
+        raise io.ValidationError("bead_footprint: no valid curves.")
+
+    # bead width: explicit value(s), else the machine profile
+    if bead_width is None or (isinstance(bead_width, (list, tuple)) and len(bead_width) == 0):
+        if not machine:
+            raise io.ValidationError("bead_footprint: give a bead_width or a machine profile with 'bead_width'.")
+        profile = gcl.load_machine_properties(machine)
+        if "bead_width" not in profile:
+            raise io.ValidationError("bead_footprint: machine profile '{}' has no 'bead_width'.".format(machine))
+        bead_width = profile["bead_width"]
+    widths = list(bead_width) if isinstance(bead_width, (list, tuple)) else [bead_width]
+    widths = [io.validate_scalar("bead_width", w, min_value=0, allow_zero=False) for w in widths]
+    if len(widths) not in (1, len(curves)):
+        raise io.ValidationError("bead_footprint: bead_width needs one value, or one per curve "
+                                 "({} curves, {} widths).".format(len(curves), len(widths)))
+
+    opt = bl.BeadOptions(bead_width=widths[0], corner_style=corner_style, end_cap=end_cap,
+                         corner_mitre=corner_mitre, corner_blend=corner_blend,
+                         corner_bulge=corner_bulge, fuse_gap=fuse_gap, union=union,
+                         tolerance=tolerance)
+
+    # layer plane and transforms between world and plane coordinates
+    if plane is None or not plane.IsValid:
+        plane = rg.Plane(rg.Point3d(0, 0, curves[0].PointAtStart.Z), rg.Vector3d.ZAxis)
+    to_local = rg.Transform.PlaneToPlane(plane, rg.Plane.WorldXY)
+    to_world = rg.Transform.PlaneToPlane(rg.Plane.WorldXY, plane)
+    doc = Rhino.RhinoDoc.ActiveDoc
+    doc_tol = doc.ModelAbsoluteTolerance if doc else 0.001
+
+    paths, off_plane = [], 0.0
+    for i, crv in enumerate(curves):
+        local = crv.DuplicateCurve()
+        local.Transform(to_local)
+        ok, pl = local.TryGetPolyline()
+        if not ok:
+            ok, pl = local.ToPolyline(tolerance, 0.1, 0.0, 0.0).TryGetPolyline()
+            if not ok:
+                raise io.ValidationError("bead_footprint: could not discretise curve {}.".format(i))
+        off_plane = max([off_plane] + [abs(p.Z) for p in pl])
+        w = widths[i] if len(widths) > 1 else widths[0]
+        paths.append(([(p.X, p.Y) for p in pl], local.IsClosed, w))
+    if off_plane > 10 * tolerance:
+        io.report_issue("bead_footprint: curves are up to {:.3g} off the layer plane and are "
+                        "projected onto it.".format(off_plane), "warning", component)
+
+    def ring_curve(coords):
+        pts = System.Collections.Generic.List[rg.Point3d]()
+        for x, y in coords:
+            pts.Add(rg.Point3d(x, y, 0.0))
+        pts.Add(pts[0])
+        ring = rg.PolylineCurve(pts)
+        ring.Transform(to_world)
+        return ring
+
+    def planar_breps(poly, what):
+        """One shapely polygon (with holes) -> (planar Breps, boundary curves)."""
+        outer, holes = bl.rings(poly)
+        loops = [ring_curve(outer)] + [ring_curve(h) for h in holes]
+        loop_list = System.Collections.Generic.List[rg.Curve]()
+        for lp in loops:
+            loop_list.Add(lp)
+        breps = rg.Brep.CreatePlanarBreps(loop_list, doc_tol)
+        if not breps:
+            io.report_issue("bead_footprint: a {} could not be turned into a planar surface."
+                            .format(what), "warning", component)
+        return (list(breps) if breps else []), loops
+
+    surfaces, outlines, areas, islands = [], [], [], []
+    for polys in bl.footprint(paths, opt):
+        s_branch, o_branch, a_branch, i_branch = [], [], [], []
+        for poly in polys:
+            breps, loops = planar_breps(poly, "region")
+            s_branch.extend(breps)
+            o_branch.extend(loops)
+            a_branch.append(poly.area)
+        if with_islands:
+            for island in bl.islands(polys):
+                i_branch.extend(planar_breps(island, "island")[0])
+        surfaces.append(s_branch)
+        outlines.append(o_branch)
+        areas.append(a_branch)
+        islands.append(i_branch)
+    return surfaces, outlines, areas, islands, opt
