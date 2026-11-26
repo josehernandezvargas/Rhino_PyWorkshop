@@ -56,6 +56,10 @@ rhinoscriptsyntax` immediately.
 
 - `iolib.py` is the **one exception**: pure standard library + optional `openpyxl`,
   no Rhino imports. It is fully importable and testable in plain CPython.
+- `beadlib.py` is likewise Rhino-free (shapely + `iolib`) and has headless tests in
+  `tests/test_beadlib.py`. Its Rhino side (curves in, Breps out) is
+  `printlib.bead_footprint`, which imports `beadlib` inside the function so that
+  `printlib` stays importable on Rhino installs without shapely. Keep that import local.
 - Everything else can be **syntax-checked** headless (`python -m py_compile
   path/to/file.py`) and its Rhino-free logic can be exercised by importing the real
   module against stub `rhinoscriptsyntax`/`Rhino`/`System` modules (see §2.4).
@@ -130,14 +134,16 @@ gl`, not `from . import geometrylib` or `from libs import geometrylib`).
 - Cross-module dependencies inside `libs/` currently look like this (leaf → dependent):
   `iolib` ← `geometrylib` ← `curvelib`, `srflib` ← `printlib`, `gcodelib`; `printlib`
   also imports `gcodelib` (for the shared `gcodeline`/flow logic) and `curvelib` (for
-  `centercrv`, `curveselfintersection`). Keep this a DAG — `gcodelib.py` and
+  `centercrv`, `curveselfintersection`). `beadlib` depends only on `iolib` (+ shapely)
+  and is imported lazily by `printlib.bead_footprint`. Keep this a DAG — `gcodelib.py` and
   `kukalib.py` must never import `printlib.py` or `curvelib.py` back, or you'll create
   a cycle.
 
 ### 2.4 No test suite, no CI, no way to execute geometry code headless
 
-There is no `pytest`/`unittest` suite in this repo, and there cannot easily be one for
-the 7 of 8 `libs/` files that touch Rhino. Practical verification tiers, in order of
+There is no general `pytest`/`unittest` suite in this repo, and there cannot easily be
+one for the `libs/` files that touch Rhino. The exception is `tests/test_beadlib.py`
+(run `python tests/test_beadlib.py`; needs shapely), which covers `beadlib.py`. Practical verification tiers, in order of
 what's actually available to an agent:
 
 1. **Syntax check** (`python -m py_compile <file>`) — catches typos, indentation,
@@ -183,9 +189,10 @@ unless specifically asked to.
 | `iolib.py` | CSV/XLSX read/write **and** shared input validation (`ValidationError`, `report_issue`, `is_number`, `require_list`/`require_nonempty_list`, `validate_scalar`, `validate_type`). The only pure-CPython file. | No |
 | `geometrylib.py` | Interpolation (`lerp`, `lerp_bias`, `invlerp`, `remap`, `lerppts`), clamping (`minmaxcap`/`minmaxcaplist`), `bbox_bounds`, angle math (`shortestangle`, `absoluteangle`, `plane_to_abc`), `timestamp`, `normalize_pattern`, `flattenlist`, and `validate_input` (thin wrapper over `iolib.validate_type`). Leaf module — no other `libs/` dependency besides `iolib`. | Yes |
 | `curvelib.py` | Curve construction/measurement helpers: `centercrv`/`centercrv_dir`, `divide_crv_equal`, `bboxplanedomain`, `curveselfintersection`/`curveselfintersection2`, `sort_curves_z`, `spiralise`, `rounded_rectangle`, `offset_crv_both_sides`, etc. Imports `geometrylib`, `iolib`. | Yes |
-| `printlib.py` | Print-path prep: `centerobject`, `leveltoplatform`, `selfclosestpt2`, `slice_brep_uniform` (older `rs.AddSrfContourCrvs`-based slicer, currently unused by any script), `stack_curves_by_pattern`, `materialestimation` (FFF/3DCP volume-from-length estimate). `gcodeline` here is a **thin re-export of `gcodelib.gcodeline`** — kept only because `ultimaker_standalone.py` still calls `pl.gcodeline`. Imports `curvelib`, `geometrylib`, `gcodelib`, `iolib`. | Yes |
+| `printlib.py` | Print-path prep: `centerobject`, `leveltoplatform`, `selfclosestpt2`, `slice_brep_uniform` (older `rs.AddSrfContourCrvs`-based slicer, currently unused by any script), `stack_curves_by_pattern`, `materialestimation` (FFF/3DCP volume-from-length estimate), `bead_footprint` (Rhino adapter for `beadlib`: curves/GUIDs in the layer plane -> planar Breps, outlines, areas and optional island Breps per branch; bead width from `machine_settings/` via `gcodelib.load_machine_properties` when not given). `gcodeline` here is a **thin re-export of `gcodelib.gcodeline`** — kept only because `ultimaker_standalone.py` still calls `pl.gcodeline`. Imports `curvelib`, `geometrylib`, `gcodelib`, `iolib`. | Yes |
 | `gcodelib.py` | The shared, machine-agnostic G-code module (rebuilt — see §4). Machine-profile abstraction (`load_machine_properties`, `is_within_build_volume` — supports both rectangular `x/y/z` and radial/delta `r/h` build volumes), `calculate_flow` (canonical formula), `gcodeline`/`travel_move`/`print_move`/`retract`/`unretract`, `purge_duplicate_points`/`purge_collinear_points`/`center_points_to_origin`, `curve_to_polyline_points`/`curve_to_points`, `build_header`, `save_gcode_file`, and a `GCodeLib` class wrapping the stateful per-run workflow (`get_part_dims`, `check_print`, `add_header`, `save`). Imports `geometrylib`, `iolib`. | Yes |
 | `kukalib.py` | `KukaKRL` class: KRL program assembly (`krl_header`; motions `ptp`, `ptp_pose` (Cartesian, S/T), `ptp_rel`, `lin`, `lin_rel` (#BASE/#TOOL, rotations), `circ`/`circ_rel` (CA), a `start_spline`/`spl`/`slin`/`scirc`/`end_spline` block; settings `set_velocity`, `set_acceleration`, `set_approximation`, `set_orientation_mode`, `set_ptp_velocity`/`set_ptp_acceleration`; `set_output`, `wait`, fold/comment helpers), tool/base/velocity validation (delegates to `iolib.validate_scalar`), safe filename truncation on write (`write_file`). Module functions `pose`/`poses`/`arc_poses` turn Rhino planes, points and arcs (duck-typed, ids via a lazy `rhinoscriptsyntax` import) into the `(X, Y, Z, A, B, C)` tuples the motions take; `abc_from_axes`/`axes_from_abc` are the KUKA ZYX angle maths. Imports `iolib`. | No (pure string assembly + file I/O; importable and tested headless with stand-in Rhino objects) |
+| `beadlib.py` | Printed-filament footprint from toolpath centrelines: `BeadOptions` (`bead_width`, `corner_style`, `end_cap`, `corner_blend`, `corner_bulge`, `corner_mitre`, `fuse_gap`, `union`, `tolerance`), the `CORNERS` registry with `register_corner` (`round`, `mitre`, `bevel`, `blend`, `bulge`), `sweep_constant`/`sweep_variable`, `fillet_polyline`, `densify`, `turn_angles`/`windowed_turn`, `footprint`, `islands` (regions enclosed by the bead), `close_gaps`, `rings`, `width_from_flow`. The footprint is a disc sweep of the whole polyline (shapely/GEOS buffer), never a two-sided offset. Imports `iolib` and shapely only. | No (tested headless in `tests/test_beadlib.py`) |
 | `srflib.py` | Image/surface sampling and pattern generation: `sample_surface_color`, `closest_srf`, `remap_rgb_channels`, `evaluate_parameter` (fixed/image/gradient sourcing — see §5 for a **known gap**), `get_division_parameters`, `build_alternating_polylines`, `generate_pattern_stack`, `build_gradient_pattern`/`build_stack_pattern` (share a private `_gradient_factor` helper). Imports `geometrylib`, `iolib`. | Yes |
 
 `libs/__init__.py` only re-exports `iolib`'s public names (CSV/XLSX + validation) —
@@ -216,7 +223,11 @@ of `iolib`'s public surface, not a functional package boundary.
   curve-stacking, brep-slicing) that has **not yet** been elevated into `libs/` — see
   §6.2.
 - **Geometry/utility**: `spiraliser.py`, `filament_mesh.py`, `adaptive_slicing.py`,
-  `img_projection.py`.
+  `img_projection.py`, `bead_footprint.py` (thin script over `printlib.bead_footprint`;
+  inputs `curve, bead_width, corner_style, end_cap, corner_blend, corner_bulge,
+  corner_mitre, fuse_gap, union, tolerance, plane, machine`, outputs `surfaces,
+  outlines, areas, islands, info`. Islands are computed only when the component has
+  an output named `islands`).
 
 ### 3.3 `machine_settings/`
 
@@ -481,3 +492,27 @@ previous version, not yet run on a controller):
 A generated program with every new motion passes kr16cell's KRL lint and simulates there
 (`kr16cam.load`), with SPL segments drawn as straight lines. Needs a controller check: CIRC with
 `CA`, `PTP` with `S`/`T`, `$ORI_TYPE`/`$CIRC_TYPE`, and the SPLINE block with `ENDSPLINE C_SPL`.
+
+### 2026-11-27 — bead footprint tools
+
+New (headless-verified; the Rhino side still needs a GH run):
+
+- `libs/beadlib.py`: Rhino-free footprint of the printed filament (disc sweep of the
+  whole toolpath via shapely, replacing two-sided offsets that self-intersect on tight
+  curvature). Corner types are registered functions (`@register_corner`), so new ones
+  need no change elsewhere. `islands()` returns the regions enclosed by the bead, cut
+  where another bead lies inside them. Validation goes through `iolib`.
+- `libs/printlib.py`: `bead_footprint(...)` converts curves (GUIDs or geometry) to the
+  layer plane, calls `beadlib`, and builds planar Breps with holes, plus island Breps
+  when `with_islands=True`. It returns `(surfaces, outlines, areas, islands, options)`.
+  The `beadlib` import is local to the function on purpose (see §2.1).
+- `scripts/bead_footprint.py`: GH component over `printlib.bead_footprint`, with the
+  `# r: shapely>=2.0` requirement line and PEP 8 input names.
+- `tests/test_beadlib.py`: 18 tests, passing on Python 3.9 / shapely 2.0.7 and
+  Python 3.13 / shapely 2.2. `printlib.bead_footprint` and the script were also run
+  against stub Rhino modules (curves, GUIDs, per-curve widths, machine profile width,
+  islands with and without the output, errors, off-plane warning).
+
+Needs a manual GH run: `scripts/bead_footprint.py` (Brep creation with holes, island
+Breps, plane transforms, the output-name check behind `islands`, first-run shapely
+install via `# r:`).
