@@ -12,6 +12,9 @@ surface-driven parameter control, and machine-code export for desktop FFF printe
   IronPython 2.7 GHPython component: the libraries use f-strings, `from __future__ import
   annotations`, `str | Path` type hints and `pathlib`.
 - Optional: `openpyxl` for the XLSX helpers in `libs/iolib.py`.
+- Optional: `shapely >= 2.0` for the bead footprint tools (`libs/beadlib.py`,
+  `printlib.bead_footprint`, `scripts/bead_footprint.py`). The script installs it in
+  Rhino through its `# r: shapely>=2.0` line; nothing else in the repo needs it.
 
 ## Repository layout
 
@@ -49,12 +52,14 @@ module is reloaded; `scripts/kuka.py` even checks for a stale `kukalib` and tell
 | `geometrylib.py` | Interpolation and remapping (`lerp`, `invlerp`, `remap`, `minmaxcap`), bounding boxes, angles, timestamps, pattern normalisation. | Yes |
 | `curvelib.py` | Curve construction and measurement helpers (centred lines, self-intersections, spiralising, rounded rectangles, two-sided offsets). | Yes |
 | `srflib.py` | Image sampling on surfaces (`sample_surface_color`, cached bitmaps), RGB remapping, gradient profiles (`GRADIENT_MODES`) and alternating zig-zag pattern stacks. | Yes |
-| `printlib.py` | Print-path preparation: centring on the build plate, levelling to Z=0, uniform Brep slicing, pattern-based curve stacking, material estimation. | Yes |
+| `printlib.py` | Print-path preparation: centring on the build plate, levelling to Z=0, uniform Brep slicing, pattern-based curve stacking, material estimation, bead footprint surfaces (`bead_footprint`, Rhino side of `beadlib`). | Yes |
+| `beadlib.py` | Printed-filament footprint from toolpath centrelines: robust disc sweep (no self-intersecting offsets, no corner artefacts), corner types `round`/`mitre`/`bevel`/`blend`/`bulge` in an extensible registry, end caps, bead fusing, islands (regions enclosed by the bead), width from flow. Needs `shapely`. | No |
 | `gcodelib.py` | Machine profiles (cartesian and delta build volumes), the canonical flow formula, G-code line/header/file helpers and the stateful `GCodeLib` class. | Yes |
 | `kukalib.py` | `KukaKRL`: KRL program assembly with header, PTP/LIN/LIN_REL moves, outputs, waits, local subprograms and declarations, speed safety caps and safe file writing. | No |
 
 The libraries form a DAG: `iolib` <- `geometrylib` <- `curvelib`, `srflib`, `gcodelib`
-<- `printlib`; `kukalib` only depends on `iolib`. Keep it that way.
+<- `printlib`; `kukalib` and `beadlib` only depend on `iolib`, and `printlib` imports
+`beadlib` inside `bead_footprint` only. Keep it that way.
 
 ## Scripts (`scripts/`)
 
@@ -88,6 +93,7 @@ The libraries form a DAG: `iolib` <- `geometrylib` <- `curvelib`, `srflib`, `gco
 | `adaptive_slicing.py` | Computes adaptive layer heights from the overhang angle of a Brep. |
 | `img_projection.py` | Displaces points along a surface normal by the luminance of a projected image. |
 | `filament_mesh.py` | Sweeps a rounded-rectangle section along a curve into a mesh (filament preview). |
+| `bead_footprint.py` | Planar surfaces of the printed filament for the toolpath curves of one layer (`curve`), with corner types (`corner_style`, `corner_blend`, `corner_bulge`, `corner_mitre`), end caps, bead fusing, the bead width optionally read from a machine profile (`machine`), and an optional `islands` output with the regions enclosed by the bead. |
 
 ## Machine settings
 
@@ -111,6 +117,12 @@ committing:
 
 ```bash
 python -m py_compile libs/*.py scripts/*.py
+```
+
+`libs/beadlib.py` has a headless test file (needs shapely):
+
+```bash
+python tests/test_beadlib.py
 ```
 
 Pure logic (`iolib`, `kukalib`, `gcodelib.calculate_flow`, `srflib` gradients, ...) can be
